@@ -31,6 +31,7 @@ export function persistStore<T extends object>(input: {
   serialize: (value: T) => string
   deserialize: (raw: string) => T
   sync?: PersistenceSyncAPI
+  merge?: (local: T, incoming: T) => T
   delay?: number
   /** Replaces `storage.setItem` for stores whose storage can take the value itself. */
   write?: (value: T, serialized: string) => void
@@ -68,32 +69,52 @@ export function persistStore<T extends object>(input: {
     void input.storage.setItem(input.name, next)
   }
 
-  // Solid's setter overloads are too deep to spread generically; the wrapper only forwards.
-  const apply = input.setStore as unknown as (...values: unknown[]) => void
-
-  const setStore = ((...values: unknown[]) => {
-    apply(...values)
+  const setStore: SetStoreFunction<T> = (...values: unknown[]) => {
+    // SAFETY: this typed wrapper only forwards Solid setter arguments; the tuple exposes its final overload to TypeScript.
+    input.setStore(...(values as Parameters<SetStoreFunction<T>>))
     dirty = true
     touched = true
     pending.add(save)
     timer ??= setTimeout(save, delay)
-  }) as unknown as SetStoreFunction<T>
+  }
 
   const hydrate = (raw: string) => {
     last = raw
     input.setStore(reconcile(input.deserialize(raw)))
   }
 
+  const merge = (raw: string) => {
+    if (!input.merge) return hydrate(raw)
+    const merged = input.merge(input.store, input.deserialize(raw))
+
+    last = raw
+    remote = undefined
+
+    if (input.serialize(merged) === raw) {
+      clearTimeout(timer)
+      timer = undefined
+      pending.delete(save)
+      dirty = false
+      input.setStore(reconcile(merged))
+
+      return
+    }
+
+    setStore(reconcile(merged))
+  }
+
   const init = input.storage.getItem(input.name)
 
   // A value the user already changed is newer than whatever storage held.
-  if (init instanceof Promise) void init.then((raw) => raw && !touched && hydrate(raw))
-  else if (init) hydrate(init)
+  if (init instanceof Promise) void init.then((raw) => raw && (!touched || input.merge) && merge(raw))
+  else if (init) merge(init)
 
   input.sync?.[0]((data) => {
-    if (data.key !== input.name || (data.url ?? location.href) !== location.href) return
+    if (data.key !== input.name || (!input.merge && (data.url ?? location.href) !== location.href)) return
 
     if (!data.newValue) return
+
+    if (input.merge) return merge(data.newValue)
 
     // A real unsaved local change wins over another window's write, as in VS Code's storage
     // service; whether the change is real is only known when the store is serialized. Every

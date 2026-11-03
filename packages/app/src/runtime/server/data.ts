@@ -8,8 +8,9 @@ type SessionMutation = { readonly id: string; readonly type: "remove"; readonly 
 
 const REMOVED_SESSION_LIMIT = 512
 
-// The events on which the server advances a session's `time.updated` to the event's time.
+// Session activity used to rank lists, including execution before its first model step.
 const SESSION_ACTIVITY = [
+  "session.execution.started",
   "session.inbox.enqueued",
   "session.step.started",
   "session.step.ended",
@@ -49,7 +50,7 @@ export function createDesktopData(input: { data: Data; remove: (sessionID: strin
 
   const apply = (sessions: readonly SessionInfo[]) =>
     mutation.apply(sessions).map((session) => {
-      const updated = activity[session.id]
+      const updated = Math.max(activity[session.id] ?? 0, session.time.busy ?? 0)
 
       return updated && updated > session.time.updated ? { ...session, time: { ...session.time, updated } } : session
     })

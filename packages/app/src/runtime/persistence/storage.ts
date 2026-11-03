@@ -588,6 +588,7 @@ export function persisted<S extends Schema.ConstraintCodec<object, unknown>>(
   schema: S | Persistence.Migrated<S>,
   initial: NoInfer<S["Type"]>,
   platformOverride?: Platform,
+  options?: { merge?: (local: S["Type"], incoming: S["Type"]) => S["Type"] },
 ): PersistedWithReady<S["Type"]> {
   const platform = platformOverride ?? usePlatform()
   const config = resolveTarget(Predicate.isString(target) ? { key: target } : target, platform)
@@ -754,6 +755,7 @@ export function persisted<S extends Schema.ConstraintCodec<object, unknown>>(
     serialize,
     deserialize: Schema.decodeUnknownSync(json),
     sync: channel ? messageSync(channel) : undefined,
+    merge: options?.merge,
     // Drafts take the encoded document itself so large text is externalized without the store
     // re-parsing the serialized form on every save.
     write: draft

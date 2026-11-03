@@ -1,5 +1,15 @@
 import { createSimpleContext } from "@opencode/ui/context"
-import { Accessor, batch, createEffect, createMemo, createResource, createRoot, getOwner, untrack } from "solid-js"
+import {
+  Accessor,
+  batch,
+  createEffect,
+  createMemo,
+  createResource,
+  createRoot,
+  getOwner,
+  onCleanup,
+  untrack,
+} from "solid-js"
 import { createServerProjects, ServerConnection, useServers } from "./registry"
 import { pathKey } from "@/workspaces/path-key"
 import { useServerHealth } from "@/runtime/server/health"
@@ -11,7 +21,7 @@ import { createPermissionAutoApprover } from "@/session/requests/auto-approve"
 import { createServerNotificationState } from "@/shell/notifications/notification"
 import { createNotificationCoordinator } from "@/shell/notifications/coordinator"
 import { useCurrentRoute } from "@/shell/state/layout"
-import { useTabs } from "@/shell/tabs/tabs"
+import { tabKey, useTabs } from "@/shell/tabs/tabs"
 import { Persist, persisted } from "@/runtime/persistence/storage"
 import { createDesktopData } from "./data"
 import { ModelState } from "./persistence"
@@ -226,6 +236,17 @@ function createServerController(
     data: source,
     remove: (sessionID) => sdk.api.session.remove({ sessionID }),
   })
+
+  onCleanup(
+    data.on("session.execution.started", (event) => {
+      const tab = tabs.store.find(
+        (tab) => tab.type === "session" && tab.server === connKey && tab.sessionId === event.data.sessionID,
+      )
+
+      if (!tab || tabs.store[0] === tab) return
+      tabs.reorder([tab, ...tabs.store.filter((item) => item !== tab)].map(tabKey))
+    }),
+  )
 
   // Transcripts otherwise stay loaded for every session this window ever opened. Open tabs and the three most
   // recently viewed sessions keep theirs; any other session reloads its transcript when it is opened again.

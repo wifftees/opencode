@@ -17,6 +17,30 @@ async function openHome(page: Page, input: Parameters<typeof mockStressTimeline>
   await page.goto("/")
 }
 
+test("Home raises a session when its agent starts before a model step", async ({ page }) => {
+  const workspace = await mockWorkspace(page, {
+    name: "HomeStartOrder",
+    sessions: [
+      { id: "ses_start_new", title: "Recent session", time: { created: T0, updated: T0 + 2 } },
+      { id: "ses_start_old", title: "Older session", time: { created: T0, updated: T0 + 1 } },
+    ],
+  })
+
+  await page.goto("/")
+  const titles = page.locator('[data-component="home-session-row"] [data-component="home-session-title"]')
+  await expect(titles).toHaveText(["Recent session", "Older session"])
+  await workspace.push([
+    {
+      id: "evt_home_start_old",
+      created: T0 + 100,
+      type: "session.execution.started",
+      durable: { aggregateID: "ses_start_old", seq: 1, version: 1 },
+      data: { sessionID: "ses_start_old" },
+    } satisfies Extract<OpenCodeEvent, { type: "session.execution.started" }>,
+  ])
+  await expect(titles).toHaveText(["Older session", "Recent session"])
+})
+
 test("Home keeps the session list in every interface mode", async ({ page }) => {
   const earlier = { id: "ses_home_earlier", title: "Finished earlier" }
   await mockWorkspace(page, { name: "Home", sessions: [earlier] })
@@ -27,7 +51,7 @@ test("Home keeps the session list in every interface mode", async ({ page }) => 
 
   // The Inbox mode moves session tabs into the sidebar inbox; Home stays the session list.
   for (const mode of ["Side tabs", "Inbox", "Top tabs"]) {
-    await page.keyboard.press("Control+,")
+    await page.keyboard.press("ControlOrMeta+,")
     const settings = page.getByTestId("settings-screen")
     const option = settings.getByRole("radio", { name: mode, exact: true })
     await settings.getByRole("group", { name: "Interface", exact: true }).getByText(mode, { exact: true }).click()
@@ -89,7 +113,7 @@ test("the session context menu renames, exports, and deletes a Home session", as
   const box = await target.boundingBox()
   await target.click({ button: "right", position: { x: 48, y: 12 } })
   await expect(page).toHaveURL("/")
-  await expect(page.getByRole("menuitem")).toHaveText(["Rename", "Export…", "Delete…"])
+  await expect(page.getByRole("menuitem")).toHaveText(["Pin session", "Rename", "Export…", "Delete…"])
   const menu = await page.locator('[data-component="menu-v2-content"]').boundingBox()
   expect(Math.abs((menu?.x ?? 0) - (box?.x ?? 0) - 48)).toBeLessThan(4)
 
@@ -131,6 +155,96 @@ test("the session context menu renames, exports, and deletes a Home session", as
   await dialog.getByRole("button", { name: "Delete session" }).click()
   await removed
   await expect(renamedRow).toBeHidden()
+})
+
+test("Home pins survive reload, stay unique in search, and synchronize between windows", async ({ page, context }) => {
+  const sessions = [
+    { id: "ses_pin_new", title: "Newest ordinary", time: { created: T0, updated: T0 + 3 } },
+    { id: "ses_pin_middle", title: "Middle ordinary", time: { created: T0, updated: T0 + 2 } },
+    { id: "ses_pin_old", title: "Old pinned", time: { created: T0, updated: T0 + 1 } },
+  ]
+
+  await mockWorkspace(page, { name: "Pins", sessions })
+  await page.goto("/")
+  const titles = page.locator('[data-component="home-session-row"] [data-component="home-session-title"]')
+  await expect(titles).toHaveText(["Newest ordinary", "Middle ordinary", "Old pinned"])
+  await row(page, "Old pinned").click({ button: "right" })
+  await page.getByRole("menuitem", { name: "Pin session", exact: true }).click()
+  await expect(titles).toHaveText(["Old pinned", "Newest ordinary", "Middle ordinary"])
+  await expect(page.getByText("Pinned", { exact: true })).toBeVisible()
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          JSON.parse(localStorage.getItem("opencode.global.dat:session-pins.v1") ?? "null")?.sessions?.local
+            ?.ses_pin_old?.pinned,
+      ),
+    )
+    .toBe(true)
+  await page.reload()
+  await expect(titles).toHaveText(["Old pinned", "Newest ordinary", "Middle ordinary"])
+
+  const search = page.getByRole("textbox", { name: /Search sessions/ })
+  await search.fill("Old pinned")
+  await expect(page.getByRole("option")).toHaveCount(1)
+  await expect(page.getByRole("option")).toContainText("Old pinned")
+  await search.press("Escape")
+
+  const other = await context.newPage()
+  await mockWorkspace(other, { name: "Pins", sessions })
+  await other.goto("/")
+  await expect(other.locator('[data-component="home-session-row"] [data-component="home-session-title"]')).toHaveText([
+    "Old pinned",
+    "Newest ordinary",
+    "Middle ordinary",
+  ])
+  await row(other, "Old pinned").click({ button: "right" })
+  await other.getByRole("menuitem", { name: "Unpin session", exact: true }).click()
+  await expect(titles).toHaveText(["Newest ordinary", "Middle ordinary", "Old pinned"])
+  await expect(page.getByText("Pinned", { exact: true })).toHaveCount(0)
+  await other.close()
+})
+
+test("Home restores old pins beyond the recent limit and excludes archived, deleted, and other-server pins", async ({
+  page,
+}) => {
+  const ordinary = Array.from({ length: 80 }, (_, i) => ({
+    id: `ses_pin_ordinary_${i}`,
+    title: `Ordinary ${i}`,
+    time: { created: T0, updated: T0 + 100 - i },
+  }))
+
+  const pin = { pinned: true, updated: T0, writer: "seed" }
+
+  await mockWorkspace(page, {
+    name: "OldPins",
+    sessions: [
+      ...ordinary,
+      { id: "ses_pin_oldest", title: "Oldest pinned", time: { created: T0, updated: T0 } },
+      { id: "ses_pin_archived", title: "Archived pinned", time: { created: T0, updated: T0, archived: T0 + 1 } },
+    ],
+    seed: {
+      tabs: [],
+      storage: {
+        "opencode.global.dat:session-pins.v1": {
+          sessions: {
+            local: { ses_pin_oldest: pin, ses_pin_archived: pin, ses_pin_missing: pin },
+            "http://another-server:4096": { ses_pin_ordinary_0: pin },
+          },
+        },
+      },
+    },
+  })
+  await page.goto("/")
+  const titles = page.locator('[data-component="home-session-row"] [data-component="home-session-title"]')
+  await expect(titles).toHaveText(["Oldest pinned", ...ordinary.slice(0, 64).map((item) => item.title)])
+  await expect(page.getByText("Archived pinned", { exact: true })).toHaveCount(0)
+  await expect(page.getByText("Pinned", { exact: true })).toBeVisible()
+  await row(page, "Oldest pinned").click({ button: "right" })
+  await page.getByRole("menuitem", { name: "Delete…", exact: true }).click()
+  await page.getByRole("dialog").getByRole("button", { name: "Delete session", exact: true }).click()
+  await expect(titles).toHaveText(ordinary.slice(0, 64).map((item) => item.title))
+  await expect(page.getByText("Pinned", { exact: true })).toHaveCount(0)
 })
 
 test("the Home shortcut focuses session search, and the Home button leaves focus alone", async ({ page }) => {

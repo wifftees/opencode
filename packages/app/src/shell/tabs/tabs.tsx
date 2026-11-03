@@ -22,6 +22,7 @@ import {
 import { appendPrompt, promptLength } from "@/composer/prompt-parts"
 import { TabStorage } from "./schema"
 import { useCurrentRoute } from "@/shell/state/layout"
+import { mergeSessionPins, SessionPins } from "@/home/sessions/pins"
 
 export type SessionTab = typeof TabStorage.Session.Type
 
@@ -74,6 +75,59 @@ export const { use: useTabs, provider: TabsProvider } = createSimpleContext({
     const servers = useServers()
     const pluginServers = usePluginServers()
     const platform = usePlatform()
+    const writer = uuid()
+
+    const [pins, setPins, , pinsReady] = persisted(
+      { ...Persist.global("session-pins.v1"), sync: true },
+      SessionPins,
+      { sessions: {} },
+      platform,
+      { merge: mergeSessionPins },
+    )
+
+    const sessionPins = {
+      ready: pinsReady,
+      isPinned: (server: ServerConnection.Key, sessionID: string) =>
+        pins.sessions[servers.scope(server)]?.[sessionID]?.pinned === true,
+      ids: (server: ServerConnection.Key) =>
+        Object.entries(pins.sessions[servers.scope(server)] ?? {})
+          .filter(([, entry]) => entry.pinned)
+          .sort(([a, x], [b, y]) => (x.order ?? x.updated) - (y.order ?? y.updated) || a.localeCompare(b))
+          .map(([id]) => id),
+      set: (server: ServerConnection.Key, sessionID: string, pinned: boolean) => {
+        if (!pinsReady()) return
+        const scope = servers.scope(server)
+        setPins("sessions", (current) => ({
+          ...current,
+          [scope]: {
+            ...current[scope],
+            [sessionID]: {
+              pinned,
+              updated: Math.max(Date.now(), (current[scope]?.[sessionID]?.updated ?? 0) + 1),
+              writer,
+              order: current[scope]?.[sessionID]?.order ?? Date.now(),
+            },
+          },
+        }))
+      },
+      reorder: (server: ServerConnection.Key, ids: string[]) => {
+        if (!pinsReady()) return
+        const scope = servers.scope(server)
+
+        setPins("sessions", scope, (current) =>
+          Object.fromEntries(
+            Object.entries(current ?? {}).map(([id, entry]) => {
+              const order = ids.indexOf(id)
+
+              if (order === -1 || !entry.pinned) return [id, entry]
+
+              return [id, { ...entry, order, updated: Math.max(Date.now(), entry.updated + 1), writer }]
+            }),
+          ),
+        )
+      },
+    }
+
     const [store, setStore, _, ready] = persisted(Persist.window("tabs"), TabStorage.Tabs, [])
 
     const [recent, setRecent, , recentReady] = persisted(Persist.window("tabs.recent"), TabStorage.Recent, {
@@ -639,6 +693,6 @@ export const { use: useTabs, provider: TabsProvider } = createSimpleContext({
       },
     }
 
-    return { ...actions, store, info, closed, ready, infoReady, recentReady, closedReady, regionsReady }
+    return { ...actions, store, info, closed, ready, infoReady, recentReady, closedReady, regionsReady, sessionPins }
   },
 })

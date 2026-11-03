@@ -40,6 +40,8 @@ function SessionTabSlot(props: {
   active: boolean
   orientation: "horizontal" | "vertical"
   session: SessionInfo | undefined
+  pinned?: boolean
+  closable?: boolean
   preparing: boolean
   unread: boolean
   attention: boolean
@@ -85,6 +87,8 @@ function SessionTabSlot(props: {
         href={tabHref(props.tab)}
         server={props.tab.server}
         session={props.session}
+        pinned={props.pinned}
+        closable={props.closable}
         preparing={props.preparing}
         unread={props.unread}
         attention={props.attention}
@@ -105,6 +109,7 @@ function SessionTabSlot(props: {
 
 function SessionTabEntry(props: {
   tab: SessionTab
+  pinned?: boolean
   currentTab?: Tab
   id: string
   index: number
@@ -123,6 +128,7 @@ function SessionTabEntry(props: {
   const pending = createMemo(() => tabs.pendingSession(props.tab.server, props.tab.sessionId))
   const cachedSession = createMemo(() => props.serverCtx?.data.session.get(props.tab.sessionId))
   const persisted = createMemo(() => tabs.info[props.id])
+  const open = createMemo(() => tabs.store.some((tab) => tabKey(tab) === props.id))
 
   const status = useSessionTabAvatarState(
     () => props.tab.server,
@@ -135,7 +141,7 @@ function SessionTabEntry(props: {
 
   const [loadedSession] = createResource(
     () => {
-      if (pending() || (!props.active && persisted()?.title)) return null
+      if (pending() || (!props.pinned && !props.active && persisted()?.title)) return null
       const ctx = props.serverCtx
 
       return ctx ? { id: props.tab.sessionId, ctx } : null
@@ -147,9 +153,36 @@ function SessionTabEntry(props: {
         .catch(() => undefined),
   )
 
-  const session = createMemo(() => (pending() ? undefined : (cachedSession() ?? loadedSession())))
+  const session = createMemo(() =>
+    pending()
+      ? undefined
+      : (cachedSession() ??
+        (loadedSession.state === "ready" || loadedSession.state === "refreshing" ? loadedSession.latest : undefined)),
+  )
+
   const missingSession = createMemo(() => !pending() && !!props.serverCtx && !loadedSession.loading && !session())
-  const visible = createMemo(() => !!pending() || !!session() || missingSession() || !!persisted()?.title)
+
+  const visible = createMemo(() => {
+    if (props.pinned) return !!session() && !session()?.time.archived && !session()?.parentID
+
+    return !!pending() || !!session() || missingSession() || !!persisted()?.title
+  })
+
+  createEffect(() => {
+    const ctx = props.serverCtx
+
+    if (!ctx) return
+    onCleanup(
+      ctx.data.on("session.deleted", (event) => {
+        if (
+          event.data.sessionID !== props.tab.sessionId ||
+          !tabs.sessionPins.isPinned(props.tab.server, props.tab.sessionId)
+        )
+          return
+        tabs.sessionPins.set(props.tab.server, props.tab.sessionId, false)
+      }),
+    )
+  })
 
   const rename = async (title: string) => {
     const value = session()
@@ -227,6 +260,7 @@ function SessionTabEntry(props: {
 
     if (
       pending() ||
+      !open() ||
       !ctx ||
       props.active ||
       ctx.data.session.missing(id) ||
@@ -287,7 +321,7 @@ function SessionTabEntry(props: {
   createEffect(() => {
     const value = session()
 
-    if (!value) return
+    if (!value || !open()) return
     tabs.rememberSessionInfo(
       props.tab,
       value,
@@ -311,6 +345,8 @@ function SessionTabEntry(props: {
         active={props.active}
         orientation={props.orientation}
         session={session()}
+        pinned={props.pinned}
+        closable={open()}
         preparing={!!pending()}
         unread={unread()}
         attention={status.attention()}
@@ -392,7 +428,28 @@ export function TitlebarTabStrip(props: {
   const global = useGlobal()
   const language = useLanguage()
   const command = useCommand()
+  const pins = useTabs().sessionPins
   const vertical = () => props.orientation === "vertical"
+  const pinned = (tab: Tab) => vertical() && tab.type === "session" && pins.isPinned(tab.server, tab.sessionId)
+
+  const pinnedTabs = createMemo(() =>
+    !vertical() || !pins.ready()
+      ? []
+      : global.servers.list().flatMap((conn) => {
+          const server = ServerConnection.key(conn)
+
+          return pins.ids(server).map((sessionId): SessionTab => {
+            const open = props.tabs.find(
+              (tab) => tab.type === "session" && tab.server === server && tab.sessionId === sessionId,
+            )
+
+            return open?.type === "session" ? open : { type: "session", server, sessionId }
+          })
+        }),
+  )
+
+  const ordinaryTabs = createMemo(() => props.tabs.filter((tab) => !pinned(tab)))
+  const orderedTabs = createMemo(() => [...pinnedTabs(), ...ordinaryTabs()])
   let listRef!: HTMLDivElement
   let scrollRef!: HTMLDivElement
   // Each vertical edge feathers by as much as there is left to scroll past it, so it appears and leaves without a jump.
@@ -412,13 +469,13 @@ export function TitlebarTabStrip(props: {
   })
   const [visibility, setVisibility] = createStore<Record<string, boolean>>({})
   const [unread, setUnread] = createStore<Record<string, boolean>>({})
-  const visibleTabs = createMemo(() => props.tabs.filter((tab) => tab.type === "draft" || visibility[tabKey(tab)]))
+  const visibleTabs = createMemo(() => orderedTabs().filter((tab) => tab.type === "draft" || visibility[tabKey(tab)]))
   const visibleTabIds = () => visibleTabs().map(tabKey)
 
   // Tells the closed sidebar's toggle whether any row here shows its unread dot, which the current tab never does.
   createEffect(() => {
     if (!vertical()) return
-    setSidebarUnread(props.tabs.some((tab) => tab !== props.currentTab && !!unread[tabKey(tab)]))
+    setSidebarUnread(orderedTabs().some((tab) => tab !== props.currentTab && !!unread[tabKey(tab)]))
     onCleanup(() => setSidebarUnread(false))
   })
 
@@ -487,9 +544,64 @@ export function TitlebarTabStrip(props: {
   function selectAdjacentTab(offset: -1 | 1, include?: (key: string) => boolean) {
     const current = props.currentTab
     const key = adjacentTabKey(visibleTabIds(), current ? tabKey(current) : undefined, offset, include)
-    const next = props.tabs.find((tab) => tabKey(tab) === key)
+    const next = orderedTabs().find((tab) => tabKey(tab) === key)
 
     if (next) props.onNavigate(next)
+  }
+
+  const renderTab = (tab: Tab) => {
+    const id = tabKey(tab)
+    let ref!: HTMLDivElement
+    const visibleIndex = () => visibleTabs().findIndex((item) => tabKey(item) === id)
+    const element = () => ref
+    tabRefs.set(id, element)
+    onCleanup(() => {
+      if (tabRefs.get(id) === element) tabRefs.delete(id)
+    })
+
+    const serverCtx = useServerCtx(() => {
+      if (tab.type !== "session") return
+
+      return global.servers.list().find((item) => ServerConnection.key(item) === tab.server)
+    })
+
+    if (tab.type === "session") {
+      return (
+        <SessionTabEntry
+          tab={tab}
+          pinned={pinned(tab)}
+          currentTab={props.currentTab}
+          id={id}
+          index={visibleIndex()}
+          active={!!props.currentTab && tabKey(props.currentTab) === id}
+          orientation={vertical() ? "vertical" : "horizontal"}
+          serverCtx={serverCtx()}
+          onVisibleChange={(visible) => setVisibility(id, visible)}
+          onUnreadChange={(value) => setUnread(id, value)}
+          onNavigate={(element) => {
+            ref = element
+            props.onNavigate(tab, element)
+          }}
+          onClose={() => props.onClose(tab)}
+        />
+      )
+    }
+
+    return (
+      <DraftTabSlot
+        tab={tab}
+        id={id}
+        index={visibleIndex()}
+        active={!!props.currentTab && tabKey(props.currentTab) === id}
+        orientation={vertical() ? "vertical" : "horizontal"}
+        title={language.t("session.tab.session")}
+        onNavigate={(element) => {
+          ref = element
+          props.onNavigate(tab, element)
+        }}
+        onClose={() => props.onClose(tab)}
+      />
+    )
   }
 
   return (
@@ -560,11 +672,31 @@ export function TitlebarTabStrip(props: {
             const { initialIndex, index } = source
 
             if (initialIndex !== index) {
+              const moved = arrayMove(current, source.initialIndex, source.index)
+              const from = orderedTabs().find((tab) => tabKey(tab) === current[initialIndex])
+              const to = orderedTabs().find((tab) => tabKey(tab) === current[index])
+
+              if (!from || !to || pinned(from) !== pinned(to)) return
+
+              if (pinned(from)) {
+                const sessions = moved.flatMap((key) => pinnedTabs().find((tab) => tabKey(tab) === key) ?? [])
+
+                for (const conn of global.servers.list()) {
+                  const server = ServerConnection.key(conn)
+                  pins.reorder(
+                    server,
+                    sessions.filter((tab) => tab.server === server).map((tab) => tab.sessionId),
+                  )
+                }
+
+                return
+              }
+
               props.onReorder(
                 mergeVisibleTabOrder(
                   props.tabs.map(tabKey),
-                  current,
-                  arrayMove(current, source.initialIndex, source.index),
+                  current.filter((key) => ordinaryTabs().some((tab) => tabKey(tab) === key)),
+                  moved.filter((key) => ordinaryTabs().some((tab) => tabKey(tab) === key)),
                 ),
               )
             }
@@ -577,61 +709,18 @@ export function TitlebarTabStrip(props: {
             classList={{ "flex-row items-center": !vertical(), "flex-col items-stretch": vertical() }}
             ref={listRef}
           >
-            <For each={props.tabs}>
-              {(tab) => {
-                const id = tabKey(tab)
-                let ref!: HTMLDivElement
-                const visibleIndex = () => visibleTabs().findIndex((item) => tabKey(item) === id)
-                const element = () => ref
-                tabRefs.set(id, element)
-                onCleanup(() => {
-                  if (tabRefs.get(id) === element) tabRefs.delete(id)
-                })
-
-                const serverCtx = useServerCtx(() => {
-                  if (tab.type !== "session") return
-
-                  return global.servers.list().find((item) => ServerConnection.key(item) === tab.server)
-                })
-
-                if (tab.type === "session") {
-                  return (
-                    <SessionTabEntry
-                      tab={tab}
-                      currentTab={props.currentTab}
-                      id={id}
-                      index={visibleIndex()}
-                      active={props.currentTab === tab}
-                      orientation={vertical() ? "vertical" : "horizontal"}
-                      serverCtx={serverCtx()}
-                      onVisibleChange={(visible) => setVisibility(id, visible)}
-                      onUnreadChange={(value) => setUnread(id, value)}
-                      onNavigate={(element) => {
-                        ref = element
-                        props.onNavigate(tab, element)
-                      }}
-                      onClose={() => props.onClose(tab)}
-                    />
-                  )
-                }
-
-                return (
-                  <DraftTabSlot
-                    tab={tab}
-                    id={id}
-                    index={visibleIndex()}
-                    active={props.currentTab === tab}
-                    orientation={vertical() ? "vertical" : "horizontal"}
-                    title={language.t("session.tab.session")}
-                    onNavigate={(element) => {
-                      ref = element
-                      props.onNavigate(tab, element)
-                    }}
-                    onClose={() => props.onClose(tab)}
-                  />
-                )
-              }}
-            </For>
+            <Show when={vertical()} fallback={<For each={ordinaryTabs()}>{renderTab}</For>}>
+              <div role="group" aria-label={language.t("home.sessions.group.pinned")} class="flex flex-col gap-1">
+                <div class="px-2 py-1 text-[12px] leading-4 text-v2-text-text-faint">
+                  {language.t("home.sessions.group.pinned")}
+                </div>
+                <For each={pinnedTabs()}>{renderTab}</For>
+              </div>
+              <div role="group" aria-label={language.t("titlebar.tabs")} class="flex flex-col gap-1">
+                <div class="px-2 py-1 text-[12px] leading-4 text-v2-text-text-faint">{language.t("titlebar.tabs")}</div>
+                <For each={ordinaryTabs()}>{renderTab}</For>
+              </div>
+            </Show>
           </div>
         </DragDropProvider>
       </div>

@@ -47,7 +47,7 @@ const HOME_SESSION_PLACEHOLDER_WIDTHS = [56, 38, 66, 46, 30, 52]
 function isBackgroundOpen(event: MouseEvent) {
   return shouldOpenSessionInBackground({
     button: event.button,
-    mac: typeof navigator === "object" && /(Mac|iPod|iPhone|iPad)/.test(navigator.platform),
+    mac: /(Mac|iPod|iPhone|iPad)/.test(globalThis.navigator?.platform ?? ""),
     meta: event.metaKey,
     ctrl: event.ctrlKey,
     shift: event.shiftKey,
@@ -65,6 +65,9 @@ export type HomeSessionsViewProps = {
   showProjectName: boolean
   server: ServerConnection.Key
   canCreateSession: boolean
+  canPin: boolean
+  isPinned: (server: ServerConnection.Key, session: SessionInfo) => boolean
+  onTogglePin: (server: ServerConnection.Key, session: SessionInfo) => void
   searchValue: string
   searchPlaceholder: string
   searchOpen: boolean
@@ -807,6 +810,11 @@ function HomeSessionRow(
               requestAnimationFrame(() => rowButton()?.focus())
             }}
           >
+            <Menu.Item disabled={!props.canPin} onSelect={() => props.onTogglePin(props.server, props.record.session)}>
+              {props.language.t(
+                props.isPinned(props.server, props.record.session) ? "home.sessions.unpin" : "home.sessions.pin",
+              )}
+            </Menu.Item>
             <Menu.Item onSelect={openEditor}>{props.language.t("common.rename")}</Menu.Item>
             <Menu.Item onSelect={() => void props.onExportSession(props.server, props.record.session)}>
               {props.language.t("common.export")}…

@@ -2,8 +2,8 @@ import type { SessionInfo } from "@opencode/client/promise"
 import { useDialog } from "@opencode/ui/context/dialog"
 import { Button } from "@opencode/ui/button"
 import { DialogFooter, DialogHeader, DialogTitleGroup, Dialog } from "@opencode/ui/dialog"
-import { useQuery, useQueryClient } from "@tanstack/solid-query"
-import { type Accessor, createEffect, createMemo, type JSX, startTransition, untrack } from "solid-js"
+import { useQueries, useQuery, useQueryClient } from "@tanstack/solid-query"
+import { type Accessor, createEffect, createMemo, type JSX, onCleanup, startTransition, untrack } from "solid-js"
 import { notifySessionTabsRemoved } from "@/shell/titlebar/session-events"
 import { useCommand } from "@/shell/commands/command"
 import { HOME_SESSION_LIMIT, mergeHomeSessionIndex, retainHomeSessions } from "@/home/sessions/index"
@@ -27,7 +27,7 @@ import { buildHomeSessionRecords, homeProjectForSession, homeSessionLocation, ty
 export type { HomeSessionRecord } from "./records"
 
 export type HomeSessionGroup = {
-  id: "today" | "yesterday" | "older"
+  id: "pinned" | "today" | "yesterday" | "older"
   title: string
   sessions: HomeSessionRecord[]
 }
@@ -41,6 +41,53 @@ export function createHomeSessionsController(home: HomeController) {
   const language = useLanguage()
   const platform = usePlatform()
   const queryClient = useQueryClient()
+  const pins = tabs.sessionPins
+  const pinsReady = pins.ready
+
+  const isPinned = (server: ServerConnection.Key, session: SessionInfo) =>
+    pins.isPinned(server, session.id)
+
+  const pinnedIDs = createMemo(() => {
+    const conn = home.server.focused()
+
+    if (!conn || !pinsReady()) return []
+
+    return pins.ids(ServerConnection.key(conn))
+  })
+
+  const pinnedLoad = useQueries(() => {
+    const conn = home.server.focused()
+    const ctx = home.server.focusedContext()
+
+    return {
+      queries:
+        ctx && conn
+          ? pinnedIDs().map((id) => ({
+              queryKey: ["home-pinned-session", conn, id] as const,
+              enabled: ctx.sdk.connection.status() === "connected",
+              queryFn: ({ signal }: { signal: AbortSignal }) => ctx.sdk.api.session.get({ sessionID: id }, { signal }),
+              placeholderData: () => ctx.data.session.get(id),
+              select: (session: SessionInfo) => () => session,
+              retry: false,
+              staleTime: 30_000,
+            }))
+          : [],
+    }
+  })
+
+  createEffect(() => {
+    const conn = home.server.focused()
+    const ctx = home.server.focusedContext()
+
+    if (!conn || !ctx) return
+    const server = ServerConnection.key(conn)
+    onCleanup(
+      ctx.data.on("session.deleted", (event) => {
+        if (!pinsReady() || !pins.isPinned(server, event.data.sessionID)) return
+        pins.set(server, event.data.sessionID, false)
+      }),
+    )
+  })
 
   const projectDirectories = createMemo(() => {
     const selected = home.selection.value().directory
@@ -67,13 +114,20 @@ export function createHomeSessionsController(home: HomeController) {
 
     if (!ctx || !conn) return []
 
-    return retainHomeSessions(
-      ctx.data.session.apply(
-        mergeHomeSessionIndex(sessionLoad.isPending ? [] : (sessionLoad.data?.() ?? []), ctx.data.session.list()),
+    const sessions = ctx.data.session.apply(
+      mergeHomeSessionIndex(
+        [
+          ...pinnedLoad.flatMap((query) => (query.isPending ? [] : query.data ? [query.data()] : [])),
+          ...(sessionLoad.isPending ? [] : (sessionLoad.data?.() ?? [])),
+        ],
+        ctx.data.session.list(),
       ),
-      HOME_SESSION_LIMIT,
-      Date.now(),
     )
+
+    return [
+      ...retainHomeSessions(sessions, HOME_SESSION_LIMIT, Date.now()),
+      ...sessions.filter((session) => isPinned(ServerConnection.key(conn), session)),
+    ]
   })
 
   const allRecords = createMemo(() =>
@@ -82,10 +136,21 @@ export function createHomeSessionsController(home: HomeController) {
       projectDirectories,
       projects: home.project.list,
       resolveProject: (session) => home.server.focusedContext()?.projects.forSession(session),
+      isPinned: (session) => {
+        const server = home.selection.value().server
+
+        return !!server && isPinned(server, session)
+      },
     }),
   )
 
-  const records = createMemo(() => allRecords().slice(0, HOME_SESSION_LIMIT))
+  const records = createMemo(() => [
+    ...allRecords().filter((record) => record.pinned),
+    ...allRecords()
+      .filter((record) => !record.pinned)
+      .slice(0, HOME_SESSION_LIMIT),
+  ])
+
   const groups = createMemo(() => groupSessions(records(), language))
   const prefetched = new Set<string>()
 
@@ -298,7 +363,7 @@ export function createHomeSessionsController(home: HomeController) {
     data: {
       records,
       groups,
-      loading: () => sessionLoad.isPending,
+      loading: () => sessionLoad.isPending || !pinsReady(),
       searchRecords: allRecords,
     },
     platform: {
@@ -370,6 +435,11 @@ export function createHomeSessionsController(home: HomeController) {
         })
       },
       rename,
+      canPin: pinsReady,
+      isPinned,
+      togglePin: (server: ServerConnection.Key, session: SessionInfo) => {
+        pins.set(server, session.id, !isPinned(server, session))
+      },
       export: exportSession,
       showDelete: (server: ServerConnection.Key, session: SessionInfo) =>
         dialog.show(() => <DeleteDialog server={server} session={session} />),
@@ -405,6 +475,7 @@ function animateHomeRowsUp(tops: Map<string | undefined, number>) {
   document.querySelectorAll<HTMLElement>(HOME_ROW_SELECTOR).forEach((row) => {
     const before = tops.get(row.dataset.sessionId)
     const delta = before === undefined ? 0 : before - row.getBoundingClientRect().top
+
     if (delta === 0) return
     row.animate([{ transform: `translateY(${delta}px)` }, { transform: "translateY(0)" }], {
       duration: 180,
@@ -426,11 +497,15 @@ function groupSessions(records: HomeSessionRecord[], language: ReturnType<typeof
   const now = new Date()
   const today = localDay(now)
   const yesterday = localDay(new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1))
+
   const day = (record: HomeSessionRecord) =>
     localDay(new Date(record.session.time.updated ?? record.session.time.created))
-  const todaySessions = records.filter((record) => day(record) === today)
-  const yesterdaySessions = records.filter((record) => day(record) === yesterday)
-  const olderSessions = records.filter((record) => day(record) !== today && day(record) !== yesterday)
+
+  const pinnedSessions = records.filter((record) => record.pinned)
+  const ordinary = records.filter((record) => !record.pinned)
+  const todaySessions = ordinary.filter((record) => day(record) === today)
+  const yesterdaySessions = ordinary.filter((record) => day(record) === yesterday)
+  const olderSessions = ordinary.filter((record) => day(record) !== today && day(record) !== yesterday)
 
   const olderTitle =
     todaySessions.length === 0 && yesterdaySessions.length === 0
@@ -438,6 +513,7 @@ function groupSessions(records: HomeSessionRecord[], language: ReturnType<typeof
       : language.t("home.sessions.group.older")
 
   return [
+    { id: "pinned" as const, title: language.t("home.sessions.group.pinned"), sessions: pinnedSessions },
     { id: "today" as const, title: language.t("home.sessions.group.today"), sessions: todaySessions },
     { id: "yesterday" as const, title: language.t("home.sessions.group.yesterday"), sessions: yesterdaySessions },
     { id: "older" as const, title: olderTitle, sessions: olderSessions },

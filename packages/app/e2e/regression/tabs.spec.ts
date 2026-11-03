@@ -28,6 +28,41 @@ const c = { id: "ses_tab_c", title: "Tab C session" }
 
 test.use({ serviceWorkers: "block" })
 
+test("starting an agent raises its sidebar session and preserves the order across reload", async ({ page }) => {
+  const workspace = await mockWorkspace(page, {
+    name: "ActivityOrder",
+    sessions: [a, b, c],
+    seed: { tabs: [a.id, b.id, c.id], settings: { appearance: { tabLayout: "vertical" } } },
+  })
+
+  await page.goto(sessionHref(a.id))
+  const titles = page.locator('[data-slot="vertical-tabs-sidebar"] [data-titlebar-tab-title]')
+  await expect(titles).toHaveText([a.title, b.title, c.title])
+  await workspace.push([
+    {
+      id: "evt_raise_c",
+      created: T0 + 100,
+      type: "session.execution.started",
+      durable: { aggregateID: c.id, seq: 1, version: 1 },
+      data: { sessionID: c.id },
+    } satisfies Extract<OpenCodeEvent, { type: "session.execution.started" }>,
+  ])
+  await expect(titles).toHaveText([c.title, a.title, b.title])
+  await expectPath(page, sessionHref(a.id))
+  await workspace.push([
+    {
+      id: "evt_raise_b",
+      created: T0 + 200,
+      type: "session.execution.started",
+      durable: { aggregateID: b.id, seq: 1, version: 1 },
+      data: { sessionID: b.id },
+    } satisfies Extract<OpenCodeEvent, { type: "session.execution.started" }>,
+  ])
+  await expect(titles).toHaveText([b.title, c.title, a.title])
+  await page.reload()
+  await expect(titles).toHaveText([b.title, c.title, a.title])
+})
+
 test("recently closed shows ten sessions and searches older closures in close order", async ({ page }) => {
   const sessions = Array.from({ length: 100 }, (_, index) => ({
     id: `ses_closed_${index}`,
@@ -242,7 +277,226 @@ test("the browser title names the open session and resets after leaving it", asy
   await expect(page).toHaveTitle("OpenCode")
 })
 
+test("vertical sidebar restores closed pins beyond recent sessions and excludes unavailable pins", async ({ page }) => {
+  const recent = Array.from({ length: 65 }, (_, index) => ({
+    id: `ses_sidebar_recent_${index}`,
+    title: `Recent ${index}`,
+    time: { created: T0, updated: T0 + 100 - index },
+  }))
+
+  const pin = { pinned: true, updated: T0, writer: "seed" }
+
+  await mockWorkspace(page, {
+    name: "OldSidebarPins",
+    sessions: [
+      ...recent,
+      { id: b.id, title: b.title, time: { created: T0, updated: T0 } },
+      { id: "ses_sidebar_archived", title: "Archived pin", time: { created: T0, archived: T0 + 1 } },
+    ],
+    seed: {
+      tabs: [],
+      settings: { appearance: { tabLayout: "vertical" } },
+      storage: {
+        "opencode.global.dat:session-pins.v1": {
+          sessions: {
+            local: { [b.id]: pin, ses_sidebar_archived: pin, ses_sidebar_missing: pin },
+            "http://another-server:4096": { ses_sidebar_recent_0: pin },
+          },
+        },
+      },
+    },
+  })
+  await page.goto("/")
+  const sidebar = page.locator('[data-slot="vertical-tabs-sidebar"]')
+  const pinned = sidebar.getByRole("group", { name: "Pinned", exact: true })
+  await expect(pinned.locator("[data-titlebar-tab-title]")).toHaveText([b.title])
+  await expect(
+    sidebar.getByRole("group", { name: "Tabs", exact: true }).locator("[data-titlebar-tab-slot]"),
+  ).toHaveCount(0)
+  await page.reload()
+  await expect(pinned.locator("[data-titlebar-tab-title]")).toHaveText([b.title])
+  await pinned.locator(`[data-titlebar-tab-link][href="${sessionHref(b.id)}"]`).click()
+  await expectPath(page, sessionHref(b.id))
+  await expect(sidebar.locator("[data-titlebar-tab-title]")).toHaveText([b.title])
+  await page.goto(sessionHref(recent[0]!.id))
+  await expect(
+    sidebar.getByRole("group", { name: "Tabs", exact: true }).locator("[data-titlebar-tab-title]"),
+  ).toHaveText([recent[0]!.title])
+  await page.reload()
+  await expect(pinned.locator("[data-titlebar-tab-title]")).toHaveText([b.title])
+})
+
+test("vertical sidebar reorders closed pins and ordinary tabs independently across reload", async ({ page }) => {
+  const d = { id: "ses_sidebar_order_d", title: "Ordinary D" }
+  const e = { id: "ses_sidebar_order_e", title: "Ordinary E" }
+  await mockWorkspace(page, {
+    name: "SidebarOrder",
+    sessions: [a, b, c, d, e],
+    seed: {
+      tabs: [c.id, d.id, e.id],
+      settings: { appearance: { tabLayout: "vertical" } },
+      storage: {
+        "opencode.global.dat:session-pins.v1": {
+          sessions: {
+            local: {
+              [a.id]: { pinned: true, updated: T0, writer: "seed", order: 0 },
+              [b.id]: { pinned: true, updated: T0, writer: "seed", order: 1 },
+            },
+          },
+        },
+      },
+    },
+  })
+  await page.goto(sessionHref(c.id))
+  const sidebar = page.locator('[data-slot="vertical-tabs-sidebar"]')
+  const pinned = sidebar.getByRole("group", { name: "Pinned", exact: true })
+  const ordinary = sidebar.getByRole("group", { name: "Tabs", exact: true })
+  await expect(pinned.locator("[data-titlebar-tab-title]")).toHaveText([a.title, b.title])
+  await expect(ordinary.locator("[data-titlebar-tab-title]")).toHaveText([c.title, d.title, e.title])
+
+  const move = async (from: string, to: string) => {
+    const [source, target] = await Promise.all(
+      [from, to].map((id) =>
+        sidebar.locator(`[data-titlebar-tab-slot]:has(a[href="${sessionHref(id)}"])`).boundingBox(),
+      ),
+    )
+
+    if (!source || !target) throw new Error("sidebar rows have no bounding boxes")
+    await page.mouse.move(source.x + source.width / 2, source.y + source.height / 2)
+    await page.mouse.down()
+    await page.mouse.move(target.x + target.width / 2, target.y + target.height - 2, { steps: 8 })
+    await page.mouse.up()
+  }
+
+  await move(a.id, b.id)
+  await expect(pinned.locator("[data-titlebar-tab-title]")).toHaveText([b.title, a.title])
+  await expect(ordinary.locator("[data-titlebar-tab-title]")).toHaveText([c.title, d.title, e.title])
+  await move(c.id, e.id)
+  await expect(ordinary.locator("[data-titlebar-tab-title]")).toHaveText([d.title, e.title, c.title])
+  await expect(pinned.locator("[data-titlebar-tab-title]")).toHaveText([b.title, a.title])
+  await page.reload()
+  await expect(pinned.locator("[data-titlebar-tab-title]")).toHaveText([b.title, a.title])
+  await expect(ordinary.locator("[data-titlebar-tab-title]")).toHaveText([d.title, e.title, c.title])
+})
+
+test("vertical pinned sessions stay separate from open tabs through close, reopen, and unpin", async ({ page }) => {
+  const draftID = "draft_sidebar_pins"
+  await mockWorkspace(page, {
+    name: "SidebarPins",
+    sessions: [a, b, c],
+    seed: {
+      tabs: [a.id, b.id, c.id, { draft: draftID, directory: "C:/OpenCode/SidebarPins" }],
+      settings: { appearance: { tabLayout: "vertical" } },
+    },
+  })
+  await page.goto(sessionHref(c.id))
+  const sidebar = page.locator('[data-slot="vertical-tabs-sidebar"]')
+  const pinned = sidebar.getByRole("group", { name: "Pinned", exact: true })
+  const ordinary = sidebar.getByRole("group", { name: "Tabs", exact: true })
+  const titles = sidebar.locator("[data-titlebar-tab-slot] [data-titlebar-tab-title]")
+  const tabB = sidebar.locator(`[data-titlebar-tab-slot]:has(a[href="${sessionHref(b.id)}"])`)
+  await expect(pinned).toBeVisible()
+  await expect(pinned.locator("[data-titlebar-tab-slot]")).toHaveCount(0)
+  await expect(ordinary.locator("[data-titlebar-tab-title]")).toHaveText([a.title, b.title, c.title, "Session"])
+
+  await tabB.locator("[data-titlebar-tab-title]").click({ button: "right" })
+  await page.getByRole("menuitem", { name: "Pin session", exact: true }).click()
+  await expect(pinned.locator("[data-titlebar-tab-title]")).toHaveText([b.title])
+  await expect(ordinary.locator("[data-titlebar-tab-title]")).toHaveText([a.title, c.title, "Session"])
+  await expect(titles).toHaveText([b.title, a.title, c.title, "Session"])
+  await expect(tabB).toHaveCount(1)
+  await expect(tabB.getByLabel("Pinned", { exact: true })).toBeVisible()
+
+  await tabB.hover()
+  await tabB.getByRole("button", { name: "Close tab", exact: true }).click()
+  await expectPath(page, sessionHref(c.id))
+  await expect(pinned.locator("[data-titlebar-tab-title]")).toHaveText([b.title])
+  await expect(tabB.getByRole("button", { name: "Close tab", exact: true })).toHaveCount(0)
+  await tabB.locator("[data-titlebar-tab-link]").click()
+  await expectPath(page, sessionHref(b.id))
+  await expect(tabB).toHaveCount(1)
+  await expect(tabB.getByRole("button", { name: "Close tab", exact: true })).toHaveCount(1)
+
+  await tabB.locator("[data-titlebar-tab-title]").click({ button: "right" })
+  await page.getByRole("menuitem", { name: "Unpin session", exact: true }).click()
+  await expect(pinned.locator("[data-titlebar-tab-slot]")).toHaveCount(0)
+  await expect(ordinary.locator("[data-titlebar-tab-title]")).toHaveText([a.title, c.title, "Session", b.title])
+  await expectPath(page, sessionHref(b.id))
+  await expect(tabB.getByLabel("Pinned", { exact: true })).toHaveCount(0)
+  await page.keyboard.press("Alt+ArrowDown")
+  await expectPath(page, sessionHref(a.id))
+
+  const draft = ordinary.locator(`[data-titlebar-tab-slot]:has(a[href="${draftHref(draftID)}"])`)
+  await draft.locator("[data-titlebar-tab-link]").click({ button: "right" })
+  await expect(page.getByRole("menuitem", { name: /^(Unpin|Pin) session$/ })).toHaveCount(0)
+  await page.keyboard.press("Escape")
+})
+
 for (const tabLayout of ["horizontal", "vertical"] as const) {
+  test(`a ${tabLayout} tab shares pins with Home and other session windows`, async ({ page, context }) => {
+    const input = {
+      name: "TabPins",
+      sessions: [a, b, c],
+      seed: { tabs: [a.id, b.id, c.id], settings: { appearance: { tabLayout } } },
+    }
+
+    await mockWorkspace(page, input)
+    await page.goto(sessionHref(c.id))
+
+    const titles = page.locator("[data-titlebar-tab-slot] [data-titlebar-tab-title]")
+
+    const target = page.locator(
+      `[data-titlebar-tab-slot]:has(a[href="${sessionHref(b.id)}"]) [data-titlebar-tab-title]`,
+    )
+
+    await expect(titles).toHaveText([a.title, b.title, c.title])
+    await target.click({ button: "right" })
+    await page.getByRole("menuitem", { name: "Pin session", exact: true }).click()
+    await expect(titles).toHaveText(
+      tabLayout === "vertical" ? [b.title, a.title, c.title] : [a.title, b.title, c.title],
+    )
+    await expectPath(page, sessionHref(c.id))
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            JSON.parse(localStorage.getItem("opencode.global.dat:session-pins.v1") ?? "null")?.sessions?.local
+              ?.ses_tab_b?.pinned,
+        ),
+      )
+      .toBe(true)
+    await page.reload()
+    await expect(titles).toHaveText(
+      tabLayout === "vertical" ? [b.title, a.title, c.title] : [a.title, b.title, c.title],
+    )
+
+    const other = await context.newPage()
+    await mockWorkspace(other, input)
+    await other.goto(sessionHref(a.id))
+
+    const otherTarget = other.locator(
+      `[data-titlebar-tab-slot]:has(a[href="${sessionHref(b.id)}"]) [data-titlebar-tab-title]`,
+    )
+
+    await expect(otherTarget).toHaveText(b.title)
+    await otherTarget.click({ button: "right" })
+    await other.getByRole("menuitem", { name: "Unpin session", exact: true }).click()
+    await expect(titles).toHaveText([a.title, b.title, c.title])
+    await other.close()
+
+    await target.click({ button: "right" })
+    await page.getByRole("menuitem", { name: "Pin session", exact: true }).click()
+    await page.getByRole("button", { name: "Home", exact: true }).click()
+    const rows = page.locator('[data-component="home-session-row"] [data-component="home-session-title"]')
+    await expect(rows).toHaveText([b.title, a.title, c.title])
+    const pinned = page.locator('[data-component="home-session-row"]').filter({ hasText: b.title })
+
+    await pinned.click({ button: "right" })
+    await page.getByRole("menuitem", { name: "Unpin session", exact: true }).click()
+    await page.locator(`[data-titlebar-tab-slot] a[href="${sessionHref(c.id)}"]`).click()
+    await expect(titles).toHaveText([a.title, b.title, c.title])
+  })
+
   test(`a ${tabLayout} tab can be renamed again while its previous rename is still saving`, async ({ page }) => {
     await mockWorkspace(page, { name: "Tabs", sessions: [a, b], seed: { settings: { appearance: { tabLayout } } } })
     await page.goto(sessionHref(a.id))

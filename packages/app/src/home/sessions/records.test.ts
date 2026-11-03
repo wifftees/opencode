@@ -3,17 +3,18 @@ import type { SessionInfo } from "@opencode/client/promise"
 import type { LocalProject } from "@/shell/state/layout"
 import { buildHomeSessionRecords, homeSessionLocation } from "./records"
 
-const session = (id: string, directory: string, projectID: string) =>
-  ({
-    id,
-    projectID,
-    title: id,
-    location: { directory },
-    time: { created: 1, updated: 1 },
-  }) as SessionInfo
+const session = (id: string, directory: string, projectID: string): SessionInfo => ({
+  id,
+  projectID,
+  title: id,
+  location: { directory },
+  time: { created: 1, updated: 1 },
+  cost: 0,
+  tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+})
 
 describe("buildHomeSessionRecords", () => {
-  const opened = { id: "project-a", worktree: "/repo/a" } as LocalProject
+  const opened: LocalProject = { id: "project-a", worktree: "/repo/a" }
   const sessions = [session("a", "/repo/a", "project-a"), session("b", "/repo/b", "project-b")]
 
   test("includes sessions outside added projects when unfiltered", () => {
@@ -49,7 +50,7 @@ describe("buildHomeSessionRecords", () => {
   })
 
   test("prefers the added project whose directory matches over a sibling entry with the same ID", () => {
-    const nested = { id: "project-a", worktree: "/repo/a/packages/app" } as LocalProject
+    const nested: LocalProject = { id: "project-a", worktree: "/repo/a/packages/app" }
 
     const records = buildHomeSessionRecords({
       sessions: () => [session("n", "/repo/a/packages/app", "project-a")],
@@ -73,6 +74,29 @@ describe("buildHomeSessionRecords", () => {
     })
 
     expect(records.map((record) => record.session.id)).toEqual(["ses_a", "ses_z", "ses_old"])
+  })
+
+  test("pins within the selected project without duplicates and restores chronological order on unpin", () => {
+    const old = session("old", "/repo/a", "project-a")
+    const recent = { ...session("recent", "/repo/a", "project-a"), time: { created: 1, updated: 3 } }
+    const middle = { ...session("middle", "/repo/a", "project-a"), time: { created: 1, updated: 2 } }
+    const other = session("other", "/repo/b", "project-b")
+
+    for (const pinned of [true, false]) {
+      const records = buildHomeSessionRecords({
+        sessions: () => [old, recent, middle, old, other],
+        projectDirectories: () => ["/repo/a"],
+        projects: () => [opened],
+        isPinned: (item) => pinned && (item.id === "old" || item.id === "other"),
+      })
+
+      expect(records.map((record) => record.session.id)).toEqual(
+        pinned ? ["old", "recent", "middle"] : ["recent", "middle", "old"],
+      )
+      expect(records.filter((record) => record.pinned).map((record) => record.session.id)).toEqual(
+        pinned ? ["old"] : [],
+      )
+    }
   })
 })
 

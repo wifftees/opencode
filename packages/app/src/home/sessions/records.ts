@@ -9,6 +9,7 @@ export type HomeSessionRecord = {
   session: SessionInfo
   project: LocalProject
   projectName: string
+  pinned?: boolean
 }
 
 export function homeSessionLocation(directory: string, branch?: string) {
@@ -20,6 +21,7 @@ export function buildHomeSessionRecords(input: {
   projectDirectories: () => string[] | undefined
   projects: () => LocalProject[]
   resolveProject?: (session: SessionInfo) => LocalProject | undefined
+  isPinned?: (session: SessionInfo) => boolean
 }) {
   const selected = input.projectDirectories()
   const directories = selected ? new Set(selected.map(pathKey)) : undefined
@@ -29,7 +31,7 @@ export function buildHomeSessionRecords(input: {
     : input.sessions()
 
   return [...new Map(sessions.map((session) => [session.id, session] as const)).values()]
-    .sort(compareSessionTime)
+    .sort((a, b) => Number(!!input.isPinned?.(b)) - Number(!!input.isPinned?.(a)) || compareSessionTime(a, b))
     .map((session) => {
       const project = input.resolveProject?.(session) ??
         homeProjectForSession(session, input.projects()) ?? {
@@ -37,7 +39,7 @@ export function buildHomeSessionRecords(input: {
           worktree: session.location.directory,
         }
 
-      return { session, project, projectName: displayName(project) }
+      return { session, project, projectName: displayName(project), pinned: !!input.isPinned?.(session) }
     })
 }
 

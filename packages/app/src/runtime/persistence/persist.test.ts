@@ -8,7 +8,12 @@ const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
 type State = { count: number; label: string }
 
-function setup(input: { initial?: string | null; delay?: number; sync?: PersistenceSyncAPI }) {
+function setup(input: {
+  initial?: string | null
+  delay?: number
+  sync?: PersistenceSyncAPI
+  merge?: (local: State, incoming: State) => State
+}) {
   const writes: string[] = []
 
   return createRoot((dispose) => {
@@ -28,6 +33,7 @@ function setup(input: { initial?: string | null; delay?: number; sync?: Persiste
       serialize: JSON.stringify,
       deserialize: JSON.parse,
       sync: input.sync,
+      merge: input.merge,
       delay: input.delay ?? 10,
     })
 
@@ -36,6 +42,85 @@ function setup(input: { initial?: string | null; delay?: number; sync?: Persiste
 }
 
 describe("persistStore", () => {
+  test("stores without merge still ignore updates from a different page URL", () => {
+    const listeners: PersistenceSyncCallback[] = []
+    const value = setup({ sync: [(subscriber) => listeners.push(subscriber), () => {}] })
+
+    listeners[0]!({
+      key: "state",
+      newValue: JSON.stringify({ count: 9, label: "remote" }),
+      timeStamp: 0,
+      url: "https://opencode.test/other-session",
+    })
+    expect(value.store).toEqual({ count: 0, label: "" })
+    value.dispose()
+  })
+
+  test("an opt-in merge preserves independent changes made by dirty windows", () => {
+    const listeners: PersistenceSyncCallback[] = []
+
+    const sync = (other: number): PersistenceSyncAPI => [
+      (subscriber) => listeners.push(subscriber),
+      (key, newValue) =>
+        listeners[other]!({
+          key,
+          newValue: String(newValue),
+          timeStamp: 0,
+          url: "https://opencode.test/other-session",
+        }),
+    ]
+
+    const merge = (local: State, incoming: State) => ({
+      count: Math.max(local.count, incoming.count),
+      label: local.label > incoming.label ? local.label : incoming.label,
+    })
+
+    const first = setup({ sync: sync(1), merge, delay: 10_000 })
+    const second = setup({ sync: sync(0), merge, delay: 10_000 })
+    first.set("count", 1)
+    second.set("label", "other")
+    first.persist.flush()
+    second.persist.flush()
+    first.persist.flush()
+    expect(first.store).toEqual({ count: 1, label: "other" })
+    expect(second.store).toEqual({ count: 1, label: "other" })
+    expect(second.writes).toEqual([JSON.stringify({ count: 1, label: "other" })])
+    first.dispose()
+    second.dispose()
+  })
+
+  test("an opt-in merge combines a late storage snapshot with an earlier remote change", async () => {
+    const loaded = Promise.withResolvers<string | null>()
+    const listeners: PersistenceSyncCallback[] = []
+
+    const value = createRoot((dispose) => {
+      const [store, setStore] = createStore<State>({ count: 0, label: "" })
+
+      const persist = persistStore({
+        store,
+        setStore,
+        name: "state",
+        storage: { getItem: () => loaded.promise, setItem: async () => {}, removeItem: async () => {} },
+        serialize: JSON.stringify,
+        deserialize: JSON.parse,
+        sync: [(subscriber) => listeners.push(subscriber), () => {}],
+        merge: (local, incoming) => ({
+          count: Math.max(local.count, incoming.count),
+          label: local.label || incoming.label,
+        }),
+        delay: 10_000,
+      })
+
+      return { store, persist, dispose }
+    })
+
+    listeners[0]!({ key: "state", newValue: JSON.stringify({ count: 2, label: "" }), timeStamp: 0 })
+    loaded.resolve(JSON.stringify({ count: 1, label: "saved" }))
+    await value.persist.init
+    expect(value.store).toEqual({ count: 2, label: "saved" })
+    value.dispose()
+  })
+
   test("marks the store dirty on set and writes once after the delay", async () => {
     const value = setup({})
     value.set("count", 1)

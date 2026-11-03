@@ -15,6 +15,7 @@ import { SessionTabAvatarView } from "@/shell/layout/session-tab-avatar"
 import type { SessionInfo } from "@opencode/client/promise"
 import { sessionTabTitle } from "./tab-title"
 import { TabPreviewPopover } from "./tab-popover"
+import { useTabs } from "@/shell/tabs/tabs"
 import "./tab-nav.css"
 
 // MouseEvent.button uses 1 for the middle/wheel button.
@@ -25,6 +26,8 @@ export function TabNavItem(props: {
   href: string
   server: ServerConnection.Key
   session: SessionInfo | undefined
+  pinned?: boolean
+  closable?: boolean
   preparing: boolean
   unread: boolean
   attention: boolean
@@ -43,6 +46,7 @@ export function TabNavItem(props: {
   orientation?: "horizontal" | "vertical"
 }) {
   const language = useLanguage()
+  const pins = useTabs().sessionPins
   const [menu, setMenu] = createStore({ open: false, rename: false })
   const [editing, setEditing] = createSignal(false)
   const [titleOverflowing, setTitleOverflowing] = createSignal(false)
@@ -53,7 +57,8 @@ export function TabNavItem(props: {
   const closeTab = (event: MouseEvent) => {
     event.preventDefault()
     event.stopPropagation()
-    props.onClose()
+
+    if (props.closable !== false) props.onClose()
   }
 
   const servers = useServers()
@@ -357,6 +362,13 @@ export function TabNavItem(props: {
             event.preventDefault()
           }}
         />
+        <Show when={props.pinned}>
+          <span role="img" aria-label={language.t("home.sessions.group.pinned")} class="flex shrink-0">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <path d="m10 1 5 5-2 1-2 4-2-1-5 5-1-1 5-5-1-2 4-2 1-2Z" stroke="currentColor" stroke-linejoin="round" />
+            </svg>
+          </span>
+        </Show>
       </Menu.Context.Trigger>
 
       <div data-slot="tab-close">
@@ -365,18 +377,20 @@ export function TabNavItem(props: {
           <span data-mark="attention" data-slot="tab-status-dot" />
           <span data-mark="unread" data-slot="tab-status-dot" />
         </span>
-        <IconButton
-          size="small"
-          variant="ghost-muted"
-          class="hover-reveal relative z-10"
-          onPointerDown={(event) => {
-            event.preventDefault()
-            event.stopPropagation()
-          }}
-          onClick={closeTab}
-          icon={<Icon name="xmark-small" />}
-          aria-label={language.t("common.closeTab")}
-        />
+        <Show when={props.closable !== false}>
+          <IconButton
+            size="small"
+            variant="ghost-muted"
+            class="hover-reveal relative z-10"
+            onPointerDown={(event) => {
+              event.preventDefault()
+              event.stopPropagation()
+            }}
+            onClick={closeTab}
+            icon={<Icon name="xmark-small" />}
+            aria-label={language.t("common.closeTab")}
+          />
+        </Show>
       </div>
     </div>
   )
@@ -414,6 +428,22 @@ export function TabNavItem(props: {
             openRename()
           }}
         >
+          <Show when={props.session && !props.preparing}>
+            <Menu.Item
+              disabled={!pins.ready()}
+              onSelect={() => {
+                const session = props.session
+
+                if (session) pins.set(props.server, session.id, !pins.isPinned(props.server, session.id))
+              }}
+            >
+              {language.t(
+                props.session && pins.isPinned(props.server, props.session.id)
+                  ? "home.sessions.unpin"
+                  : "home.sessions.pin",
+              )}
+            </Menu.Item>
+          </Show>
           <Menu.Item disabled={!props.session} onSelect={() => setMenu("rename", true)}>
             {language.t("common.rename")}
           </Menu.Item>
