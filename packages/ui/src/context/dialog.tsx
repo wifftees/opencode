@@ -342,7 +342,7 @@ export function useDialog() {
      * signal aborts, the open neither mounts nor replaces anything and onClose runs as for a replaced dialog.
      */
     show(element: DialogElement, onClose?: () => void, id?: string, signal?: AbortSignal) {
-      const base = ctx.stack().at(-1)?.owner ?? owner
+      const base = ctx.top()?.owner ?? owner
 
       return startTransition(() => {
         if (signal?.aborted) return isolate(() => onClose?.())
@@ -350,7 +350,7 @@ export function useDialog() {
       })
     },
     push(element: DialogElement, onClose?: () => void, id?: string, signal?: AbortSignal) {
-      const base = ctx.stack().at(-1)?.owner ?? owner
+      const base = ctx.top()?.owner ?? owner
 
       return startTransition(() => {
         if (signal?.aborted) return isolate(() => onClose?.())
