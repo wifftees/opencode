@@ -20,7 +20,9 @@ export function matchesCommandPaletteEntry(entry: CommandPaletteEntry, query: st
 
   if (!value) return true
 
-  // The server matches sessions by title, so their "Session" group name must not match every one of them here.
+  if (entry.searchMatch?.query === value) return true
+
+  // A session's group name must not match every session in the list.
   const category = entry.type === "session" ? undefined : entry.category
 
   return [entry.title, entry.description, category, entry.keywords, entry.path, entry.sessionID].some((text) =>
@@ -30,16 +32,22 @@ export function matchesCommandPaletteEntry(entry: CommandPaletteEntry, query: st
 
 const typeOrder = { command: 0, session: 1, setting: 2, file: 3 }
 
-/** Search results: commands lead, then sessions (those open as tabs first, then the newest), settings and files. */
+/** Commands lead, then sessions by title/content relevance, open tabs and recency, followed by settings and files. */
 export function rankCommandPaletteEntries(
   entries: CommandPaletteEntry[],
   open: (entry: CommandPaletteEntry) => boolean,
+  query = "",
 ) {
   return entries.toSorted(
     (a, b) =>
       typeOrder[a.type] - typeOrder[b.type] ||
       (a.type === "session" && b.type === "session"
-        ? Number(open(b)) - Number(open(a)) || (b.updated ?? 0) - (a.updated ?? 0)
+        ? (query
+            ? Number(a.searchMatch?.kind === "content") - Number(b.searchMatch?.kind === "content") ||
+              (b.searchMatch?.score ?? 0) - (a.searchMatch?.score ?? 0)
+            : 0) ||
+          Number(open(b)) - Number(open(a)) ||
+          (b.updated ?? 0) - (a.updated ?? 0)
         : 0),
   )
 }
@@ -91,29 +99,40 @@ export function createCommandPaletteSearch(props: {
   const items = createMemo<CommandPaletteEntry[]>(() => {
     const current = query()
 
-    const entries = uniqueCommandPaletteEntries([
-      ...local(),
-      ...sources.flatMap((source) => {
-        const result =
-          source.result.state === "ready" || source.result.state === "refreshing" ? source.result.latest : emptyResult
+    const currentEntry = (entry: CommandPaletteEntry): CommandPaletteEntry => {
+      if (!entry.searchMatch || entry.searchMatch.query === current.toLowerCase()) return entry
+      const { searchMatch, ...rest } = entry
 
-        if (result.query === current) return result.items
+      return rest
+    }
 
-        if (!current) return []
+    const entries = uniqueCommandPaletteEntries(
+      [
+        ...local(),
+        ...sources.flatMap((source) => {
+          const result =
+            source.result.state === "ready" || source.result.state === "refreshing" ? source.result.latest : emptyResult
 
-        const matched = uniqueCommandPaletteEntries([...result.items, ...source.state.seen]).filter((item) =>
-          matchesCommandPaletteEntry(item, current),
-        )
+          if (result.query === current) return result.items
 
-        if (matched.length > 0) return matched
+          if (!current) return []
 
-        return result.query && current.toLowerCase().startsWith(result.query.toLowerCase()) ? result.items : []
-      }),
-    ])
+          const matched = uniqueCommandPaletteEntries([...result.items, ...source.state.seen]).filter((item) =>
+            matchesCommandPaletteEntry(item, current),
+          )
+
+          if (matched.length > 0) return matched
+
+          return result.query && current.toLowerCase().startsWith(result.query.toLowerCase())
+            ? result.items.filter((item) => item.searchMatch?.kind !== "content")
+            : []
+        }),
+      ].map(currentEntry),
+    )
 
     if (!current) return entries
 
-    return rankCommandPaletteEntries(entries, props.open ?? (() => false))
+    return rankCommandPaletteEntries(entries, props.open ?? (() => false), current)
   })
 
   return {

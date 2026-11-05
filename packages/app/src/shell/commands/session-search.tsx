@@ -5,6 +5,7 @@ import { useLanguage } from "@/runtime/i18n/language"
 import { ServerConnection, useServers } from "@/runtime/server/registry"
 import { useTabs } from "@/shell/tabs/tabs"
 import { createKnownServerSessions, createServerSessionEntries, type CommandPaletteEntry } from "./palette"
+import { showToast } from "@/shell/notifications/toast"
 import { CommandPaletteView } from "./dialog"
 
 const RECENT_LIMIT = 10
@@ -30,6 +31,9 @@ export function DialogSessionSearch() {
       projects: ctx.projects.list,
       load: (search, signal) =>
         ctx.sdk.api.session.list({ parentID: null, search, archived: false, limit: 50 }, { signal }),
+      contentSearch: (query, signal) => ctx.sdk.api.session.search({ query, archived: false, limit: 50 }, { signal }),
+      onContentUnavailable: () =>
+        showToast({ title: language.t("palette.session.contentUnavailable"), description: registry.tag(conn) }),
       get: (sessionID, signal) => ctx.sdk.api.session.get({ sessionID }, { signal }),
       untitled: () => language.t("command.session.new"),
       category: () => language.t("command.category.session"),

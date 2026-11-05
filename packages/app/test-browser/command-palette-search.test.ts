@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test"
 import { createComputed, createRoot, createSignal } from "solid-js"
-import type { CommandPaletteEntry } from "@/shell/commands/palette"
-import { createCommandPaletteSearch } from "@/shell/commands/search"
+import { uniqueCommandPaletteEntries, type CommandPaletteEntry } from "@/shell/commands/palette"
+import { createCommandPaletteSearch, matchesCommandPaletteEntry, rankCommandPaletteEntries } from "@/shell/commands/search"
+import { sessionSnippetParts } from "@/shell/commands/session-snippet"
 
 const copy: CommandPaletteEntry = {
   id: "command:session.copyID",
@@ -28,6 +29,72 @@ const session: CommandPaletteEntry = {
 }
 
 const tab: CommandPaletteEntry = { ...session, id: "session:tab", title: "Copy tab", updated: 1 }
+
+describe("message hit ranking", () => {
+  const content: CommandPaletteEntry = {
+    ...session,
+    id: "session:content",
+    title: "Deployment notes",
+    updated: 20,
+    searchMatch: { query: "postgres", kind: "content", score: 5, snippet: "PostgreSQL setup" },
+  }
+
+  test("puts title hits ahead of open recent body hits and orders body hits by relevance", () => {
+    const title: CommandPaletteEntry = { ...session, title: "Postgres migration", updated: 1, searchMatch: { query: "postgres", kind: "title", score: 1 } }
+    const weaker: CommandPaletteEntry = { ...content, id: "session:weaker", updated: 30, searchMatch: { query: "postgres", kind: "content", score: 2 } }
+
+    expect(rankCommandPaletteEntries([weaker, content, title], (entry) => entry.id === weaker.id, "postgres")).toEqual([title, content, weaker])
+    expect(rankCommandPaletteEntries([title, content], (entry) => entry.id === content.id)).toEqual([content, title])
+  })
+
+  test("enriches a cached session with remote match metadata without duplicating it", () => {
+    const cached: CommandPaletteEntry = { ...session, id: content.id, title: "Latest deployment title" }
+    const entries = uniqueCommandPaletteEntries([cached, content])
+
+    expect(entries).toHaveLength(1)
+    expect(entries[0]).toMatchObject({ title: cached.title, searchMatch: content.searchMatch })
+    expect(matchesCommandPaletteEntry(entries[0], "postgres")).toBe(true)
+    expect(matchesCommandPaletteEntry(entries[0], "postgres migration")).toBe(false)
+
+    const refined: CommandPaletteEntry = { ...content, searchMatch: { query: "postgres migration", kind: "content", score: 2, snippet: "New matching excerpt" } }
+
+    expect(uniqueCommandPaletteEntries([refined, content])[0]?.searchMatch).toEqual(refined.searchMatch)
+  })
+
+  test("drops stale body hits on refinement but can reuse their matching title without a stale snippet", async () => {
+    const first = Promise.withResolvers<CommandPaletteEntry[]>()
+    const pending = Promise.withResolvers<CommandPaletteEntry[]>()
+    const ready = Promise.withResolvers<void>()
+
+    const root = createRoot((dispose) => {
+      const [query, setQuery] = createSignal("postgres")
+      const search = createCommandPaletteSearch({ query, items: () => [], sources: [(query) => query === "postgres" ? first.promise : pending.promise] })
+
+      createComputed(() => { if (search.items().some((entry) => entry.id === content.id)) ready.resolve() })
+
+      return { search, setQuery, dispose }
+    })
+
+    first.resolve([content])
+    await ready.promise
+    expect(root.search.items()).toEqual([content])
+    root.setQuery("postgres missing")
+    expect(root.search.items()).toEqual([])
+    expect(root.search.loading()).toBe(true)
+    root.setQuery("deployment")
+    expect(root.search.items()).toMatchObject([{ id: content.id, title: content.title }])
+    expect(root.search.items()[0]?.searchMatch).toBeUndefined()
+    root.dispose()
+  })
+
+  test("marks Unicode word prefixes and leaves snippet text intact", () => {
+    const text = "Настройка PostgreSQL и МИГРАЦИИ <script> Café"
+    const parts = sessionSnippetParts(text, "postgre мигр cafe")
+
+    expect(parts.map((part) => part.text).join("")).toBe(text)
+    expect(parts.filter((part) => part.matched).map((part) => part.text)).toEqual(["PostgreSQL", "МИГРАЦИИ", "Café"])
+  })
+})
 
 describe("command palette search", () => {
   test("matches commands synchronously and cancels obsolete requests", () => {

@@ -39,6 +39,14 @@ export type MockProviderCatalog = {
 // oxlint-disable-next-line anti-slop/no-unsafe-dictionary-type -- scenarios seed arbitrary session fields
 export type MockSession = { id: string } & Record<string, unknown>
 
+export type MockSessionSearchHit = {
+  session: MockSession
+  matchKind: "title" | "content"
+  score: number
+  snippet?: string
+  messageID?: string
+}
+
 export type MockMcpStatus = { status: string; error?: string }
 
 export type MockFileContent =
@@ -99,6 +107,10 @@ export interface MockServerConfig {
   onMessage?: (input: { sessionID: string; messageID: string }) => void
   onRevertStage?: (input: { sessionID: string; messageID: string }) => void
   onSession?: (sessionID: string) => void
+  searchSessions?: (input: {
+    query: string
+    limit: number
+  }) => MockSessionSearchHit[] | MockAnswer | Promise<MockSessionSearchHit[] | MockAnswer>
   events?: () => OpenCodeEvent[]
   eventRetry?: number
   // Idle event streams send a comment every 15 s like the real server. Set false only to test the client's stall watchdog.
@@ -1162,6 +1174,31 @@ function mockHandlers(
               },
             })),
           ),
+        sessionSearch: (ctx) =>
+          Effect.gen(function* () {
+            const query = ctx.query.query ?? ""
+            const limit = Math.min(ctx.query.limit ?? 50, 100)
+            const search = config.searchSessions
+
+            const answer = search
+              ? yield* Effect.promise(async () => search({ query, limit }))
+              : config.sessions
+                  .filter(
+                    (session) =>
+                      !session.parentID &&
+                      !session.archived &&
+                      String(session.title ?? "")
+                        .toLowerCase()
+                        .includes(query.toLowerCase()),
+                  )
+                  .toReversed()
+                  .slice(0, limit)
+                  .map((session) => ({ session, matchKind: "title" as const, score: 1 }))
+
+            if (!Array.isArray(answer)) return HttpServerResponse.jsonUnsafe(answer.body, { status: answer.status })
+
+            return { data: answer.map((hit) => ({ ...hit, session: currentSession(hit.session, config.directory) })) }
+          }),
         sessionList: (ctx) => {
           const sessions = config.sessions
             .filter(
@@ -1528,6 +1565,10 @@ function currentPermissions(values: readonly unknown[]) {
       },
     ]
   })
+}
+
+export function sessionSearchHits(sessions: readonly MockSession[]) {
+  return sessions.map((session) => ({ session: currentSession(session), matchKind: "title" as const, score: 1 }))
 }
 
 export function currentSession(session: MockSession, fallbackDirectory?: string) {

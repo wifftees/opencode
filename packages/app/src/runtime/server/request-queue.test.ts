@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { createRequestQueue } from "./request-queue"
+import { createRequestQueue, type RequestQueueDiagnostic } from "./request-queue"
 
 function setup(input?: {
   limit?: number
@@ -9,7 +9,7 @@ function setup(input?: {
   setupHeadersTimeoutMs?: number
 }) {
   const pending: Array<{ url: string; signal: AbortSignal; resolve: () => void }> = []
-  const logs: Array<{ message: string; data: Record<string, unknown> }> = []
+  const logs: Array<{ message: string; data: RequestQueueDiagnostic }> = []
   let clock = 0
 
   const queue = createRequestQueue({
@@ -108,6 +108,7 @@ describe("createRequestQueue", () => {
     const requests: [string, string][] = [
       ["GET", "/api/a"],
       ["GET", "/api/b"],
+      ["GET", "/api/session/search?query=redis"],
       ["GET", "/api/session/ses_1/message?cursor=older&order=desc"],
       ["GET", "/api/session/ses_1/message?limit=25&before=msg_1"],
       ["GET", "/api/session/ses_1/message?type=user&order=desc"],
@@ -134,6 +135,7 @@ describe("createRequestQueue", () => {
       "/api/a",
       "/api/session/ses_1/message",
       "/api/session/ses_2",
+      "/api/session/search?query=redis",
       "/api/session?limit=1",
       "/api/session/ses_1/message?limit=40&order=desc",
       "/api/session?limit=2",
@@ -178,7 +180,7 @@ describe("createRequestQueue", () => {
     expect(input.queue.queued()).toBe(1)
     const error = await dead.catch((cause: unknown) => cause)
     expect(error).toBeInstanceOf(DOMException)
-    expect((error as DOMException).name).toBe("TimeoutError")
+    expect(error).toHaveProperty("name", "TimeoutError")
     expect(input.pending.map((item) => new URL(item.url).pathname)).toEqual(["/api/dead", "/api/next"])
     input.pending[1]!.resolve()
     await expect(next).resolves.toBeInstanceOf(Response)
@@ -196,10 +198,10 @@ describe("createRequestQueue", () => {
     ]
 
     const errors = await Promise.all(others.map((request) => request.catch((cause: unknown) => cause)))
-    expect(errors.map((error) => (error as DOMException).name)).toEqual([
-      "TimeoutError",
-      "TimeoutError",
-      "TimeoutError",
+    expect(errors).toEqual([
+      expect.objectContaining({ name: "TimeoutError" }),
+      expect.objectContaining({ name: "TimeoutError" }),
+      expect.objectContaining({ name: "TimeoutError" }),
     ])
     // Past the normal deadline, the create is still on the wire.
     expect(input.pending[0]!.signal.aborted).toBe(false)

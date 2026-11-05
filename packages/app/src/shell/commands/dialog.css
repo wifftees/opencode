@@ -255,3 +255,39 @@
     min-height: 44px;
   }
 }
+
+.command-palette-session-text {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.command-palette-session-text > .command-palette-row-text {
+  width: 100%;
+  flex: none;
+}
+
+.command-palette-session-snippet {
+  display: -webkit-box;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  color: var(--v2-text-text-muted);
+  font-size: 13px;
+  line-height: var(--line-height-compact);
+  white-space: normal;
+}
+
+.command-palette.command-palette-compact [data-slot="search-list-row"]:has(.command-palette-session-snippet) {
+  height: auto;
+  min-height: 52px;
+  align-items: flex-start;
+  padding-block: 6px;
+
+  .command-palette-row-main {
+    align-items: flex-start;
+  }
+}

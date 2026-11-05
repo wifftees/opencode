@@ -1,7 +1,8 @@
+import { Option, Schema } from "effect"
 import { abort } from "@opencode/util/abort"
 import { getFilename } from "@opencode/util/path"
 import type { Project } from "@/runtime/server/types"
-import type { SessionInfo } from "@opencode/client/promise"
+import { ClientError, type SessionInfo } from "@opencode/client/promise"
 import { useDialog } from "@opencode/ui/context/dialog"
 import { useQueryClient } from "@tanstack/solid-query"
 import { createMemo, onCleanup } from "solid-js"
@@ -22,6 +23,7 @@ import { looksLikeSessionID } from "@/session/search"
 import { createSettingsPaletteEntries } from "@/settings/palette"
 import type { SettingsSearchResult } from "@/settings/search-results"
 import { matchesCommandPaletteEntry } from "./search"
+import { showToast } from "@/shell/notifications/toast"
 
 export type CommandPaletteEntry = {
   id: string
@@ -40,6 +42,13 @@ export type CommandPaletteEntry = {
   archived?: number
   updated?: number
   setting?: SettingsSearchResult
+  searchMatch?: {
+    query: string
+    kind: "title" | "content"
+    score: number
+    snippet?: string
+    messageID?: string
+  }
 }
 
 const ENTRY_LIMIT = 5
@@ -50,14 +59,28 @@ const COMMON_COMMAND_IDS = ["session.new", "workspace.new", "session.previous", 
 const COMMON_VIEW_COMMAND_IDS = ["review.toggle"] as const
 
 export function uniqueCommandPaletteEntries(items: CommandPaletteEntry[]) {
-  const seen = new Set<string>()
+  const entries = new Map<string, CommandPaletteEntry>()
 
-  return items.filter((item) => {
-    if (seen.has(item.id)) return false
-    seen.add(item.id)
+  for (const item of items) {
+    const previous = entries.get(item.id)
 
-    return true
-  })
+    if (!previous) {
+      entries.set(item.id, item)
+
+      continue
+    }
+
+    if (
+      item.searchMatch &&
+      (!previous.searchMatch ||
+        (previous.searchMatch.query === item.searchMatch.query &&
+          previous.searchMatch.kind === "content" &&
+          item.searchMatch.kind === "title"))
+    )
+      entries.set(item.id, { ...previous, searchMatch: item.searchMatch })
+  }
+
+  return [...entries.values()]
 }
 
 export function createCommandPaletteFileEntry(path: string, category: string): CommandPaletteEntry {
@@ -155,6 +178,8 @@ export function createCommandPaletteModel(props: { filesOnly?: () => boolean; on
     projects: serverCtx.projects.list,
     load: (search, signal) =>
       serverSDK.api.session.list({ parentID: null, search, archived: false, limit: 50 }, { signal }),
+    contentSearch: (query, signal) => serverSDK.api.session.search({ query, archived: false, limit: 50 }, { signal }),
+    onContentUnavailable: () => showToast({ title: language.t("palette.session.contentUnavailable") }),
     get: (sessionID, signal) => serverSDK.api.session.get({ sessionID }, { signal }),
     untitled: () => language.t("command.session.new"),
     category: () => language.t("command.category.session"),
@@ -236,6 +261,10 @@ export function createCommandPaletteCommandEntry(option: CommandOption, category
   }
 }
 
+type SessionContentHit = Awaited<ReturnType<ServerCtx["sdk"]["api"]["session"]["search"]>>[number]
+
+const unsupportedSearchStatus = Schema.decodeUnknownOption(Schema.Struct({ status: Schema.Literals([404, 501]) }))
+
 type SessionSearchState = {
   abort?: AbortController
 }
@@ -247,6 +276,8 @@ export function createServerSessionEntries(props: {
   apply?: (sessions: SessionInfo[]) => SessionInfo[]
   projects: () => Project[]
   load: (search: string, signal: AbortSignal) => Promise<{ data: SessionInfo[] }>
+  contentSearch?: (query: string, signal: AbortSignal) => Promise<SessionContentHit[]>
+  onContentUnavailable?: () => void
   get: (sessionID: string, signal: AbortSignal) => Promise<SessionInfo>
   untitled: () => string
   category: () => string
@@ -254,7 +285,13 @@ export function createServerSessionEntries(props: {
   recentLimit?: number
 }) {
   const state: SessionSearchState = {}
-  const [store, setStore] = createStore<{ loaded: SessionInfo[] }>({ loaded: [] })
+
+  const [store, setStore] = createStore<{
+    loaded: SessionInfo[]
+    query: string
+    hits: Record<string, NonNullable<CommandPaletteEntry["searchMatch"]>>
+    contentUnavailable: boolean
+  }>({ loaded: [], query: "", hits: {}, contentUnavailable: false })
 
   // Let the newest metadata win duplicates before ranking the merged sessions newest-first.
   const known = createMemo(() => {
@@ -275,25 +312,27 @@ export function createServerSessionEntries(props: {
     const projects = props.projects()
     const category = search ? props.category() : props.recentCategory()
 
-    return sessions.flatMap((session) => {
+    return (props.apply?.(sessions) ?? sessions).flatMap((session) => {
       if (session.time.archived) return []
 
       const project = projectForSession(session, projects)
 
-      return [
-        {
-          id: `session:${props.server}:${session.id}`,
-          type: "session" as const,
-          title: session.title || props.untitled(),
-          description: project ? displayName(project) : getFilename(session.location.directory),
-          category,
-          directory: session.location.directory,
-          sessionID: session.id,
-          server: props.server,
-          project,
-          updated: session.time.updated,
-        },
-      ]
+      const entry: CommandPaletteEntry = {
+        id: `session:${props.server}:${session.id}`,
+        type: "session",
+        title: session.title || props.untitled(),
+        description: project ? displayName(project) : getFilename(session.location.directory),
+        category,
+        directory: session.location.directory,
+        sessionID: session.id,
+        server: props.server,
+        project,
+        updated: session.time.updated,
+      }
+
+      if (store.query === search.toLowerCase() && store.hits[session.id]) entry.searchMatch = store.hits[session.id]
+
+      return [entry]
     })
   }
 
@@ -319,10 +358,34 @@ export function createServerSessionEntries(props: {
 
     if (current.signal.aborted) return []
 
+    const titles = () => props.load(search, current.signal).then((result) => ({ items: result.data, hits: [] }))
+
+    const list = () => {
+      if (!search || !props.contentSearch || store.contentUnavailable) return titles()
+
+      return props.contentSearch(search, current.signal).then(
+        (hits) => ({ items: hits.map((hit) => hit.session), hits }),
+        (error) => {
+          const cause = error instanceof ClientError ? error.cause : undefined
+
+          const unsupported =
+            error instanceof ClientError &&
+            error.reason === "UnexpectedStatus" &&
+            Option.isSome(unsupportedSearchStatus(cause))
+
+          if (!unsupported || current.signal.aborted) throw error
+          setStore("contentUnavailable", true)
+          props.onContentUnavailable?.()
+
+          return titles()
+        },
+      )
+    }
+
     const [listed, exact] = await Promise.all([
-      props.load(search, current.signal).then(
-        (result) => ({ items: result.data, failed: false }),
-        () => ({ items: [], failed: true }),
+      list().then(
+        (result) => ({ ...result, failed: false }),
+        () => ({ items: [], hits: [], failed: true }),
       ),
       looksLikeSessionID(search)
         ? props.get(search, current.signal).then(
@@ -337,6 +400,21 @@ export function createServerSessionEntries(props: {
     if (listed.failed && exact.length === 0) throw new Error("Session search failed")
 
     const loaded = [...new Map([...exact, ...listed.items].map((session) => [session.id, session] as const)).values()]
+    setStore({
+      query: search.toLowerCase(),
+      hits: Object.fromEntries(
+        listed.hits.map((hit) => [
+          hit.session.id,
+          {
+            query: search.toLowerCase(),
+            kind: hit.matchKind,
+            score: hit.score,
+            snippet: hit.snippet,
+            messageID: hit.messageID,
+          },
+        ]),
+      ),
+    })
     // Keep names learned while this palette is open available to subsequent keystrokes.
     setStore("loaded", (previous) => [
       ...new Map([...previous, ...loaded].map((session) => [session.id, session] as const)).values(),

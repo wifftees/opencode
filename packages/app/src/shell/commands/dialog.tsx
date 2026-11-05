@@ -3,7 +3,7 @@ import { FileIcon } from "@opencode/ui/file-icon"
 import { Dialog, DialogBody } from "@opencode/ui/dialog"
 import { Keybind } from "@opencode/ui/keybind"
 import { SearchHighlight, SearchList, type SearchListRow } from "@opencode/ui/search-list"
-import { createMemo, Match, Show, Switch } from "solid-js"
+import { createMemo, For, Match, Show, Switch } from "solid-js"
 import { createStore } from "solid-js/store"
 import { formatKeybindParts } from "@/shell/commands/command"
 import { useLanguage } from "@/runtime/i18n/language"
@@ -15,6 +15,7 @@ import type { ServerConnection } from "@/runtime/server/registry"
 import { getRelativeTime } from "@/shell/time"
 import { createCommandPaletteFileEntry, createCommandPaletteModel, type CommandPaletteEntry } from "./palette"
 import { createCommandPaletteSearch, matchesCommandPaletteEntry } from "./search"
+import { sessionSnippetParts } from "./session-snippet"
 import "./dialog.css"
 import "../palette-menu.css"
 
@@ -203,23 +204,48 @@ function PaletteSessionRow(props: {
             />
           </Show>
           {/* A busy session shows its activity ring instead of the unread dot, as session tabs do. */}
-          <SessionTabAvatarView
-            sessionID={props.sessionID}
-            unread={status.unread() && !status.loading()}
-          />
+          <SessionTabAvatarView sessionID={props.sessionID} unread={status.unread() && !status.loading()} />
         </div>
-        <div class="command-palette-row-text">
-          <span
-            class="command-palette-title palette-menu-title"
-            dir="auto"
-            classList={{ "opacity-70": !!props.item.archived }}
-          >
-            <SearchHighlight text={props.item.title} />
-          </span>
-          <Show when={props.item.description}>
-            {(description) => (
-              <span class="command-palette-description" dir="auto" classList={{ "opacity-70": !!props.item.archived }}>
-                <SearchHighlight text={description()} />
+        <div class="command-palette-session-text">
+          <div class="command-palette-row-text">
+            <span
+              class="command-palette-title palette-menu-title"
+              dir="auto"
+              classList={{ "opacity-70": !!props.item.archived }}
+            >
+              <Show
+                when={
+                  props.item.searchMatch && !props.item.title.toLowerCase().includes(props.item.searchMatch.query)
+                    ? props.item.searchMatch
+                    : undefined
+                }
+                fallback={<SearchHighlight text={props.item.title} />}
+              >
+                {(match) => (
+                  <For each={sessionSnippetParts(props.item.title, match().query)}>
+                    {(part) => (part.matched ? <mark data-slot="search-list-match">{part.text}</mark> : part.text)}
+                  </For>
+                )}
+              </Show>
+            </span>
+            <Show when={props.item.description}>
+              {(description) => (
+                <span
+                  class="command-palette-description"
+                  dir="auto"
+                  classList={{ "opacity-70": !!props.item.archived }}
+                >
+                  <SearchHighlight text={description()} />
+                </span>
+              )}
+            </Show>
+          </div>
+          <Show when={props.item.searchMatch?.kind === "content" ? props.item.searchMatch.snippet : undefined}>
+            {(snippet) => (
+              <span class="command-palette-session-snippet" dir="auto">
+                <For each={sessionSnippetParts(snippet(), props.item.searchMatch?.query ?? "")}>
+                  {(part) => (part.matched ? <mark data-slot="search-list-match">{part.text}</mark> : part.text)}
+                </For>
               </span>
             )}
           </Show>

@@ -156,6 +156,8 @@ export const dict = {
   "palette.empty": "No results found",
   "palette.group.commands": "Commands",
   "palette.group.files": "Files",
+  "palette.session.contentUnavailable": "This server supports title search only. Update it to search messages.",
+  "palette.session.snippetLabel": "Matching message",
   "palette.group.recentSessions": "Recent sessions",
   "palette.group.settings": "Settings",
   "palette.session.location": "{{project}} · {{server}}",

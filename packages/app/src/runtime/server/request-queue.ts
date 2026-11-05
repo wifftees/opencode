@@ -1,5 +1,9 @@
 type Entry = { method: string; url: string; at: number; slow: boolean; priority: number }
 
+type RequestDiagnostic = { method: string; url: string; ms: number }
+
+export type RequestQueueDiagnostic = { limit: number; inflight: RequestDiagnostic[]; queued: RequestDiagnostic[] }
+
 // Chromium allows six connections per origin. The event stream holds one for the life of the
 // connection and health probes use their own fetch, so the app's API calls stay below that or
 // a burst stalls probes and user actions inside the browser where nothing can observe it.
@@ -40,7 +44,7 @@ export function createRequestQueue(input: {
   stallMs?: number
   headersTimeoutMs?: number
   setupHeadersTimeoutMs?: number
-  log?: (message: string, data: Record<string, unknown>) => void
+  log?: (message: string, data: RequestQueueDiagnostic) => void
   now?: () => number
 }) {
   const limit = input.limit ?? requestQueueLimit
@@ -125,7 +129,8 @@ export function createRequestQueue(input: {
 
       // The event stream is long-lived; never count it against the request budget.
       if (pathname === "/api/event") return base(request)
-      // Writes go first. Session lists and the first transcript page unblock navigation, so they
+
+      // Writes go first. Session lists, searches, and the first transcript page unblock navigation, so they
       // go ahead of location reads. Older pages and filtered indexes keep background priority.
       const initialMessages =
         /^\/api\/session\/[^/]+\/message$/.test(pathname) &&
@@ -133,7 +138,14 @@ export function createRequestQueue(input: {
         !url.searchParams.has("before") &&
         !url.searchParams.has("type") &&
         url.searchParams.get("order") !== "asc"
-      const priority = request.method !== "GET" ? 2 : pathname === "/api/session" || initialMessages ? 1 : 0
+
+      const priority =
+        request.method !== "GET"
+          ? 2
+          : pathname === "/api/session" || pathname === "/api/session/search" || initialMessages
+            ? 1
+            : 0
+
       const entry = { method: request.method, url: request.url, at: now(), slow: isSlowRequest(pathname), priority }
       const queued = acquire(entry)
 

@@ -1,11 +1,13 @@
 import type { OpenCodeEvent } from "@opencode/client/promise"
 import { expect, test } from "@playwright/test"
+import { pageMessagesFrom, sessionHref } from "../utils/app"
 import {
   captureConsoleWarnings,
   openCommandPalette,
   openPaletteWorkspace,
   paletteSession,
 } from "../utils/command-palette"
+import { sessionSearchHits } from "../utils/mock-server"
 import { mockWorkspace } from "../utils/workspace"
 
 test.use({ serviceWorkers: "block", permissions: ["clipboard-read", "clipboard-write"] })
@@ -14,7 +16,7 @@ test("copies the session ID while file and session searches are still pending", 
   const warnings = captureConsoleWarnings(page)
   const { dialog, input } = await openCommandPalette(page)
   const release = Promise.withResolvers<void>()
-  await page.route(/\/api\/(session\?|fs\/find\?)/, async (route) => {
+  await page.route(/\/api\/(session\/search\?|fs\/find\?)/, async (route) => {
     await release.promise
     await route.fallback()
   })
@@ -32,7 +34,7 @@ test("copies the session ID while file and session searches are still pending", 
 test("home commands do not wait for session search", async ({ page }) => {
   const { dialog, input } = await openCommandPalette(page, true)
   const release = Promise.withResolvers<void>()
-  await page.route("**/api/session?*", async (route) => {
+  await page.route("**/api/session/search?*", async (route) => {
     await release.promise
     await route.fallback()
   })
@@ -46,17 +48,13 @@ test("home commands do not wait for session search", async ({ page }) => {
 })
 
 test("finds a setting and opens Settings with its row in view and highlighted", async ({ page }) => {
-  await openPaletteWorkspace(page)
-  await page.keyboard.press("Control+K")
-  const dialog = page.getByRole("dialog")
-  const input = dialog.getByRole("combobox")
-  await expect(input).toBeFocused()
+  const { dialog, input } = await openCommandPalette(page)
   await input.fill("theme")
   await expect(dialog.getByRole("option", { name: /^Theme/ })).toHaveAttribute("aria-selected", "true")
 
   // Settings list after commands, and the keyboard walks rows in their visual order.
   const searched = Promise.all([
-    page.waitForResponse((response) => new URL(response.url()).pathname === "/api/session"),
+    page.waitForResponse((response) => new URL(response.url()).pathname === "/api/session/search"),
     page.waitForResponse((response) => new URL(response.url()).pathname === "/api/fs/find"),
   ])
 
@@ -316,15 +314,17 @@ test("appends search results without resetting the selected command", async ({ p
     await files.promise
     await route.fulfill({ json: { data: [{ path: "copy.txt", type: "file" }] } })
   })
-  await page.route("**/api/session?*", async (route) => {
+  await page.route("**/api/session/search?*", async (route) => {
     await sessions.promise
     // Like the server, only a matching title answers, so the session leaves the results for "copy session".
-    const search = new URL(route.request().url()).searchParams.get("search") ?? ""
+    const search = new URL(route.request().url()).searchParams.get("query") ?? ""
     await route.fulfill({
       json: {
-        data: "copy fixture".includes(search.toLowerCase())
-          ? [{ ...paletteSession, location: { directory: paletteSession.directory }, title: "Copy fixture" }]
-          : [],
+        data: sessionSearchHits(
+          "copy fixture".includes(search.toLowerCase())
+            ? [{ ...paletteSession, location: { directory: paletteSession.directory }, title: "Copy fixture" }]
+            : [],
+        ),
       },
     })
   })
@@ -351,17 +351,17 @@ test("appends search results without resetting the selected command", async ({ p
 
 test("lists commands above matching sessions and jumps between sections with Alt and the arrows", async ({ page }) => {
   const { dialog, input } = await openCommandPalette(page)
-  await page.route("**/api/session?*", (route) =>
+  await page.route("**/api/session/search?*", (route) =>
     route.fulfill({
       json: {
-        data: [
+        data: sessionSearchHits([
           {
             ...paletteSession,
             id: "ses_palette_copy",
             location: { directory: paletteSession.directory },
             title: "Copy fixture",
           },
-        ],
+        ]),
       },
     }),
   )
@@ -386,16 +386,18 @@ test("selects the first session when it arrives above automatically selected fil
   await page.route("**/api/fs/find?*", (route) =>
     route.fulfill({ json: { data: [{ path: "README.md", type: "file" }] } }),
   )
-  await page.route("**/api/session?*", async (route) => {
+  await page.route("**/api/session/search?*", async (route) => {
     await sessions.promise
     await route.fulfill({
       json: {
-        data: Array.from({ length: 18 }, (_, index) => ({
-          ...paletteSession,
-          id: index === 0 ? paletteSession.id : `ses_palette_readme_${index}`,
-          location: { directory: paletteSession.directory },
-          title: `README work ${index + 1}`,
-        })),
+        data: sessionSearchHits(
+          Array.from({ length: 18 }, (_, index) => ({
+            ...paletteSession,
+            id: index === 0 ? paletteSession.id : `ses_palette_readme_${index}`,
+            location: { directory: paletteSession.directory },
+            title: `README work ${index + 1}`,
+          })),
+        ),
       },
     })
   })
@@ -433,11 +435,13 @@ test("keeps a keyboard-selected file when session results arrive later", async (
       },
     }),
   )
-  await page.route("**/api/session?*", async (route) => {
+  await page.route("**/api/session/search?*", async (route) => {
     await sessions.promise
     await route.fulfill({
       json: {
-        data: [{ ...paletteSession, location: { directory: paletteSession.directory }, title: "README work" }],
+        data: sessionSearchHits([
+          { ...paletteSession, location: { directory: paletteSession.directory }, title: "README work" },
+        ]),
       },
     })
   })
@@ -560,11 +564,11 @@ test("keeps matching session and file results steady across keystrokes while sea
     })
   })
 
-  await page.route("**/api/session?*", async (route) => {
+  await page.route("**/api/session/search?*", async (route) => {
     await pendingSessions.promise
     await route.fulfill({
       json: {
-        data: [{ ...paletteSession, location: { directory: paletteSession.directory } }],
+        data: sessionSearchHits([{ ...paletteSession, location: { directory: paletteSession.directory } }]),
       },
     })
   })
@@ -701,4 +705,141 @@ test("titlebar session search shrinks with results while its field stays anchore
   await expect.poll(() => scroll.evaluate((element) => element.scrollTop)).toBeGreaterThan(0)
   await expect.poll(async () => (await geometry()).inputTop).toBeCloseTo(initial.inputTop, 0)
   await expect(input).toBeFocused()
+})
+
+test("session search ranks titles before chat text and shows safe highlighted excerpts without model requests", async ({
+  page,
+}) => {
+  const title = { id: "ses_search_title", title: "Redis rollout", time: { created: 100, updated: 100 } }
+  const body = { id: "ses_search_body", title: "Release notes", time: { created: 200, updated: 900 } }
+  const lower = { id: "ses_search_lower", title: "Database migration", time: { created: 300, updated: 1000 } }
+  const queries: string[] = []
+  const mutations: string[] = []
+  page.on("request", (request) => {
+    if (request.method() === "POST" && new URL(request.url()).pathname.startsWith("/api/session/"))
+      mutations.push(new URL(request.url()).pathname)
+  })
+  await mockWorkspace(page, {
+    name: "ContentSearch",
+    sessions: [title, body, lower],
+    seed: { tabs: [body.id] },
+    pageMessages: pageMessagesFrom({
+      [body.id]: [{ id: "msg_content_result", type: "user", text: "Redis cache enabled", time: { created: 200 } }],
+    }),
+    searchSessions: ({ query }) => {
+      queries.push(query)
+
+      if (query.toLowerCase() !== "redis") return []
+
+      return [
+        { session: lower, matchKind: "content", score: 1, snippet: "Redis migration", messageID: "msg_lower" },
+        {
+          session: body,
+          matchKind: "content",
+          score: 10,
+          snippet: "Enable <script>REDIS</script> caching",
+          messageID: "msg_content_result",
+        },
+        { session: title, matchKind: "title", score: 0.1 },
+      ]
+    },
+  })
+  await page.goto("/")
+  await page.getByRole("banner").getByRole("button", { name: "Search sessions", exact: true }).click()
+  const dialog = page.getByRole("dialog")
+  const input = dialog.getByRole("combobox")
+
+  await input.fill("redis")
+  await expect(dialog.getByRole("option")).toHaveText([/Redis rollout/, /Release notes/, /Database migration/])
+  const result = dialog.getByRole("option", { name: /Release notes/ })
+
+  await expect(result.locator(".command-palette-session-snippet")).toHaveText("Enable <script>REDIS</script> caching")
+  await expect(result.locator(".command-palette-session-snippet mark")).toHaveText("REDIS")
+  await expect(dialog.locator("script")).toHaveCount(0)
+  expect(queries).toContain("redis")
+  expect(mutations).toEqual([])
+  await result.click()
+  await expect(dialog).toHaveCount(0)
+  await expect(page).toHaveURL(sessionHref(body.id))
+  await expect(page.getByRole("heading", { name: body.title, exact: true })).toBeVisible()
+})
+
+test("content search clears prior query matches and recent results do not retain excerpts", async ({ page }) => {
+  const redis = { id: "ses_search_redis", title: "Cache incident" }
+  const postgres = { id: "ses_search_postgres", title: "Database incident" }
+  await mockWorkspace(page, {
+    name: "ContentQueryScope",
+    sessions: [redis, postgres],
+    searchSessions: ({ query }) => {
+      switch (query.toLowerCase()) {
+        case "redis":
+          return [{ session: redis, matchKind: "content", score: 1, snippet: "Redis service stopped" }]
+        case "postgres":
+          return [{ session: postgres, matchKind: "content", score: 1, snippet: "Postgres service stopped" }]
+        default:
+          return []
+      }
+    },
+  })
+  await page.goto("/")
+  await page.getByRole("banner").getByRole("button", { name: "Search sessions", exact: true }).click()
+  const dialog = page.getByRole("dialog")
+  const input = dialog.getByRole("combobox")
+
+  await input.fill("redis")
+  await expect(dialog.getByRole("option")).toHaveText([/Cache incident/])
+  await input.fill("postgres")
+  await expect(dialog.getByRole("option")).toHaveText([/Database incident/])
+  await expect(dialog.getByText("Redis service stopped", { exact: true })).toHaveCount(0)
+  await input.fill("")
+  await expect(dialog.getByRole("option")).toHaveCount(2)
+  await expect(dialog.locator(".command-palette-session-snippet")).toHaveCount(0)
+})
+
+test("older servers fall back to title search once and explain that messages are unavailable", async ({ page }) => {
+  const redis = { id: "ses_search_legacy_redis", title: "Redis notes" }
+  const release = { id: "ses_search_legacy_release", title: "Release notes" }
+  const searches: string[] = []
+  await mockWorkspace(page, {
+    name: "LegacyContentSearch",
+    sessions: [redis, release],
+    searchSessions: ({ query }) => {
+      searches.push(query)
+
+      return { status: 501, body: { message: "Content search unavailable" } }
+    },
+  })
+  await page.goto("/")
+  await page.getByRole("banner").getByRole("button", { name: "Search sessions", exact: true }).click()
+  const dialog = page.getByRole("dialog")
+  const input = dialog.getByRole("combobox")
+
+  await input.fill("redis")
+  await expect(dialog.getByRole("option")).toHaveText([/Redis notes/])
+  await expect(
+    page.getByText("This server supports title search only. Update it to search messages.", { exact: true }),
+  ).toBeVisible()
+  await input.fill("release")
+  await expect(dialog.getByRole("option")).toHaveText([/Release notes/])
+  expect(searches).toEqual(["redis"])
+  await expect(dialog.locator(".command-palette-session-snippet")).toHaveCount(0)
+})
+
+
+test("session search preserves case-insensitive substrings inside title words", async ({ page }) => {
+  const camel = { id: "ses_search_camel", title: "redisConfig" }
+  await mockWorkspace(page, {
+    name: "TitleSubstringSearch",
+    sessions: [camel],
+    searchSessions: () => [{ session: camel, matchKind: "title", score: 10 }],
+  })
+  await page.goto("/")
+  await page.getByRole("banner").getByRole("button", { name: "Search sessions", exact: true }).click()
+  const dialog = page.getByRole("dialog")
+
+  await dialog.getByRole("combobox").fill("CONFIG")
+  const result = dialog.getByRole("option", { name: /redisConfig/ })
+
+  await expect(result).toBeVisible()
+  await expect(result.locator(".command-palette-title mark")).toHaveText("Config")
 })
