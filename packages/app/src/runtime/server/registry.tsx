@@ -7,6 +7,8 @@ import { ServerScope } from "@/runtime/server/scope"
 import type { ServerEntry } from "@opencode/plugin/gui"
 import { ServerHttp, ServerHttpBase, ServerKey, ServerState } from "./persistence"
 
+import { pathKey } from "@/workspaces/path-key"
+
 type StoredState = typeof ServerState.Type
 
 export function normalizeServerUrl(input: string) {
@@ -62,19 +64,39 @@ export function createServerProjects(input: {
     if (next.length !== current.length) input.setStore("usedProjectIDs", input.scope(), next)
   }
 
+  const show = (directory: string) => {
+    if (!input.store.hiddenProjectPaths?.[input.scope()]?.[pathKey(directory)]) return
+    input.setStore("hiddenProjectPaths", (value) => ({
+      ...value,
+      [input.scope()]: { ...value?.[input.scope()], [pathKey(directory)]: false },
+    }))
+  }
+
   return {
+    show,
     last() {
       return input.store.lastProjectID[input.scope()]
     },
-    touch(projectID: string) {
+    hidden(directory: string) {
+      return input.store.hiddenProjectPaths?.[input.scope()]?.[pathKey(directory)] ?? false
+    },
+    touch(projectID: string, directory?: string) {
       batch(() => {
         input.setStore("lastProjectID", input.scope(), projectID)
         use([projectID])
+
+        if (directory) show(directory)
       })
     },
     used,
     use,
-    hide(projectIDs: string[]) {
+    hide(projectIDs: string[], directory?: string) {
+      if (directory)
+        input.setStore("hiddenProjectPaths", (value) => ({
+          ...value,
+          [input.scope()]: { ...value?.[input.scope()], [pathKey(directory)]: true },
+        }))
+
       input.setStore(
         "usedProjectIDs",
         input.scope(),

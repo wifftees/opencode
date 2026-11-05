@@ -19,9 +19,15 @@ export const Draft = Persistence.struct({
   draftID: Schema.String,
   server: ServerKey,
   directory: Schema.String,
+  folderID: Persistence.optional(Schema.String),
   worktree: Persistence.optional(Schema.String),
   branch: Persistence.optional(Schema.String),
-  mcp: Persistence.optional(Persistence.struct({ target: Schema.String, states: Persistence.record(Schema.Boolean) })),
+  mcp: Persistence.optional(
+    Persistence.struct({
+      target: Schema.String,
+      states: Persistence.record(Schema.Boolean),
+    }),
+  ),
 })
 
 const SessionCodec = Session.pipe(

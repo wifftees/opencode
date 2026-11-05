@@ -3,6 +3,8 @@ import { HttpApi, HttpApiEndpoint, HttpApiGroup, HttpApiSchema } from "effect/ht
 import { PersistentPty } from "@opencode/schema/persistent-pty"
 import { Pty } from "@opencode/schema/pty"
 import { Worktree } from "@opencode/schema/worktree"
+import { Location } from "@opencode/schema/location"
+import { SessionInbox } from "@opencode/schema/session-inbox"
 
 // Handlers answer plain fixture data: undefined properties are dropped, and other non-JSON values become null.
 const Json = Schema.Json.pipe(
@@ -45,6 +47,11 @@ const SessionParams = { sessionID: Schema.String }
 const PtyParams = { ptyID: Pty.ID }
 
 const NoContent = HttpApiSchema.NoContent
+
+export const MockSessionMove = Schema.Struct({
+  ...Location.PublicRef.fields,
+  delivery: Schema.optional(SessionInbox.Delivery),
+})
 
 export class MockNotFound extends Schema.TaggedError<MockNotFound>()("MockNotFound", {
   message: Schema.String,
@@ -331,6 +338,14 @@ const Group = HttpApiGroup.make("mock")
   )
   .add(HttpApiEndpoint.post("sessionCreate", "/api/session", { payload: JsonPayload, success: Json }))
   .add(HttpApiEndpoint.get("sessionActive", "/api/session/active", { success: Json }))
+  .add(
+    HttpApiEndpoint.post("sessionMove", "/api/session/:sessionID/move", {
+      params: SessionParams,
+      payload: MockSessionMove,
+      success: NoContent,
+      error: [MockNotFound.pipe(HttpApiSchema.status(404)), MockBadRequest.pipe(HttpApiSchema.status(400))],
+    }),
+  )
   .add(
     HttpApiEndpoint.post("rpcCall", "/api/rpc/:rpcID/:method", {
       params: { rpcID: Schema.String, method: Schema.String },

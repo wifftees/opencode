@@ -303,7 +303,7 @@ function createServerController(
     const ids = new Set(projects.used())
     const paths = new Set(list().flatMap((project) => (ids.has(project.id) ? [pathKey(project.worktree)] : [])))
 
-    return unique().filter((project) => paths.has(pathKey(project.worktree)))
+    return unique().filter((project) => paths.has(pathKey(project.worktree)) && !projects.hidden(project.worktree))
   })
 
   const forDirectory = (directory: string): Project | undefined => {
@@ -334,7 +334,8 @@ function createServerController(
       .get({ location: { directory } })
       .then(async (location) => {
         await sync.project.refresh()
-        projects.touch(location.project.id)
+        projects.show(directory)
+        projects.touch(location.project.id, location.project.directory)
 
         return list().find((project) => project.id === location.project.id)
       })
@@ -362,18 +363,29 @@ function createServerController(
       used,
       add,
       forDirectory,
+      hidden: projects.hidden,
       forSession: (session: SessionInfo): Project | undefined => projectForSession(session, list()),
-      last: () => list().find((project) => project.id === projects.last()),
+      last: () => list().find((project) => project.id === projects.last() && !projects.hidden(project.worktree)),
       // Marks the project of a directory as used from this client, and as the last one.
       touch(directory: string) {
-        const id = forDirectory(directory)?.id
+        projects.show(directory)
 
-        if (id) projects.touch(id)
+        const project = forDirectory(directory)
+
+        if (project) projects.touch(project.id, project.worktree)
       },
       // Removes a project from this client's used projects until it is used again; the server keeps it.
       hide(project: Pick<Project, "worktree">) {
         const key = pathKey(project.worktree)
-        projects.hide(list().flatMap((item) => (pathKey(item.worktree) === key ? [item.id] : [])))
+
+        const ids = list().flatMap((item) =>
+          pathKey(item.worktree) === key &&
+          !list().some((other) => other.id === item.id && pathKey(other.worktree) !== key)
+            ? [item.id]
+            : [],
+        )
+
+        projects.hide(ids, project.worktree)
       },
     },
     notification,

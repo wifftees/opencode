@@ -352,6 +352,7 @@ export function Titlebar(props: { verticalTabs?: { mount?: HTMLElement } }) {
 
                   if (pending) {
                     const model = tabs.stateValue<ComposerState>(pending.draft, "prompt")?.model.current()
+                    global.serverCtx(route.server)?.projects.touch(pending.draft.directory)
                     void tabs.newDraft({ server: route.server, directory: pending.draft.directory }, "", model)
 
                     return true
@@ -368,6 +369,7 @@ export function Titlebar(props: { verticalTabs?: { mount?: HTMLElement } }) {
                   }
 
                   const model = tabs.stateValue<ComposerState>(sessionTab, "prompt")?.model.current()
+                  global.serverCtx(sessionTab.server)?.projects.touch(activeSession.location.directory)
                   void tabs.newDraft(
                     { server: sessionTab.server, directory: activeSession.location.directory },
                     "",
@@ -383,6 +385,7 @@ export function Titlebar(props: { verticalTabs?: { mount?: HTMLElement } }) {
                   if (activeTab?.type !== "draft") return false
 
                   const model = tabs.stateValue<ComposerState>(activeTab, "prompt")?.model.current()
+                  global.serverCtx(activeTab.server)?.projects.touch(activeTab.directory)
                   void tabs.newDraft({ server: activeTab.server, directory: activeTab.directory }, "", model)
 
                   return true
@@ -400,12 +403,13 @@ export function Titlebar(props: { verticalTabs?: { mount?: HTMLElement } }) {
 
                   const projects = conn ? global.ensureServerCtx(conn).projects : undefined
 
+                  const visible = projects?.list().filter((project) => !projects.hidden(project.worktree)) ?? []
+
                   const project =
-                    projects?.list().find((item) => item.worktree === selection.directory) ??
-                    projects?.last() ??
-                    projects?.list()[0]
+                    visible.find((item) => item.worktree === selection.directory) ?? projects?.last() ?? visible[0]
 
                   if (conn && project) {
+                    projects?.touch(project.worktree)
                     void tabs.newDraft({ server: ServerConnection.key(conn), directory: project.worktree }, "")
 
                     return true

@@ -16,6 +16,7 @@ import {
   MockPtyNotFound,
   MockServiceUnavailable,
   MockShellNotFound,
+  MockSessionMove,
   MockUnauthorized,
   MockUnsupported,
 } from "./mock-api"
@@ -130,6 +131,12 @@ export interface MockServerConfig {
   onWorktreeRemove?: (input: Worktree.RemoveInput) => void | Promise<void>
   // POST /api/session keeps the client-reserved `id` and `location`. Return an answer to fail the attempt (1-based).
   onSessionCreate?: (body: Schema.JsonObject, attempt: number) => void | MockAnswer
+  // Holds or replaces a move response; the default moves the session and emits session.moved without changing history.
+  onSessionMove?: (input: {
+    sessionID: string
+    directory: string
+    delivery?: "queue" | "steer"
+  }) => void | MockAnswer | Promise<void | MockAnswer>
   // Title of created sessions (default: the request's title, else "New session").
   createdSessionTitle?: string
   // Slash commands served by `/api/command`.
@@ -499,6 +506,7 @@ export function createMockServerHandler(
           cursors: new Map<string, string>(),
           nextCursor: 0,
           sessionCreates: 0,
+          sessionMoves: new Map<string, number>(),
           persistentPty,
           emit,
           mcp: new Map<string, MockMcpStatus>(),
@@ -597,6 +605,7 @@ function mockHandlers(
     cursors: Map<string, string>
     nextCursor: number
     sessionCreates: number
+    sessionMoves: Map<string, number>
     persistentPty: ReturnType<typeof createPersistentPty>
     emit: (events: MockServerEvent[]) => void
     // MCP status overrides by `<directory>\n<server>`, and OAuth attempt creation times by attempt ID.
@@ -734,6 +743,61 @@ function mockHandlers(
           config.sessions.push(created)
 
           return HttpServerResponse.jsonUnsafe({ data: created })
+        }),
+      )
+      .handleRaw("sessionMove", (ctx) =>
+        Effect.gen(function* () {
+          const input = yield* Effect.orDie(ctx.request.json)
+          const payload = Option.getOrUndefined(decodeSessionMove(input))
+
+          if (!payload) return yield* new MockBadRequest({ message: "Invalid session move request" })
+          const session = config.sessions.find((item) => item.id === ctx.params.sessionID)
+
+          if (!session) return yield* new MockNotFound({ message: "Session not found" })
+          const target = location(config, payload.directory)
+          const projectID = target.project.id
+
+          if (
+            !projectID ||
+            ![...ownedDirectories(config)].some(
+              (directory) => payload.directory === directory || payload.directory.startsWith(`${directory}/`),
+            )
+          )
+            return yield* new MockBadRequest({ message: "Unknown project directory" })
+
+          const answer = yield* Effect.promise(async () =>
+            config.onSessionMove?.({ sessionID: session.id, ...payload }),
+          )
+
+          if (answer)
+            return answer.status === 204
+              ? HttpServerResponse.empty({ status: 204 })
+              : HttpServerResponse.jsonUnsafe(answer.body, { status: answer.status })
+
+          const subpath =
+            payload.directory === target.project.directory
+              ? undefined
+              : payload.directory.slice(target.project.directory.length + 1)
+
+          session.location = { directory: payload.directory }
+          session.directory = payload.directory
+          session.projectID = projectID
+          session.subpath = subpath
+          delete session.path
+          const seq = (state.sessionMoves.get(session.id) ?? 0) + 1
+
+          state.sessionMoves.set(session.id, seq)
+          state.emit([
+            {
+              id: `evt_session_moved_${session.id}_${seq}`,
+              created: Date.now(),
+              type: "session.moved",
+              durable: { aggregateID: session.id, seq, version: 1 },
+              data: { sessionID: session.id, location: { directory: payload.directory }, projectID, subpath },
+            },
+          ])
+
+          return HttpServerResponse.empty({ status: 204 })
         }),
       )
       .handleAll({
@@ -1511,6 +1575,8 @@ const decodeWorktreeAnswer = Schema.decodeUnknownOption(Schema.Struct({ director
 const decodeSessionCreate = Schema.decodeUnknownOption(
   Schema.Struct({ id: lenient(Schema.String), title: lenient(Schema.String), parentID: lenient(Schema.String) }),
 )
+
+const decodeSessionMove = Schema.decodeUnknownOption(MockSessionMove)
 
 const decodeSessionRename = Schema.decodeUnknownOption(Schema.Struct({ title: Schema.String }))
 

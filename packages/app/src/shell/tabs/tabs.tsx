@@ -23,6 +23,7 @@ import { appendPrompt, promptLength } from "@/composer/prompt-parts"
 import { TabStorage } from "./schema"
 import { useCurrentRoute } from "@/shell/state/layout"
 import { mergeSessionPins, SessionPins } from "@/home/sessions/pins"
+import { createSessionFolders } from "./folders"
 
 export type SessionTab = typeof TabStorage.Session.Type
 
@@ -76,6 +77,7 @@ export const { use: useTabs, provider: TabsProvider } = createSimpleContext({
     const pluginServers = usePluginServers()
     const platform = usePlatform()
     const writer = uuid()
+    const sessionFolders = createSessionFolders()
 
     const [pins, setPins, , pinsReady] = persisted(
       { ...Persist.global("session-pins.v1"), sync: true },
@@ -121,7 +123,15 @@ export const { use: useTabs, provider: TabsProvider } = createSimpleContext({
 
               if (order === -1 || !entry.pinned) return [id, entry]
 
-              return [id, { ...entry, order, updated: Math.max(Date.now(), entry.updated + 1), writer }]
+              return [
+                id,
+                {
+                  ...entry,
+                  order,
+                  updated: Math.max(Date.now(), entry.updated + 1),
+                  writer,
+                },
+              ]
             }),
           ),
         )
@@ -337,7 +347,10 @@ export const { use: useTabs, provider: TabsProvider } = createSimpleContext({
         void startTransition(() => {
           setStore(
             (tab) => tab.type === "draft" && tab.draftID === draftID,
-            produce((tab) => Object.assign(tab, draft)),
+            produce((tab) => {
+              if (tab.type === "draft" && draft.directory && draft.directory !== tab.directory) tab.folderID = undefined
+              Object.assign(tab, draft)
+            }),
           )
         })
       },
@@ -350,6 +363,14 @@ export const { use: useTabs, provider: TabsProvider } = createSimpleContext({
         )
       },
       promoteDraft(draftID: string, session: Omit<SessionTab, "type">) {
+        const draft = store.find((tab) => tab.type === "draft" && tab.draftID === draftID)
+
+        if (draft?.type === "draft" && draft.folderID) {
+          const folder = sessionFolders.get(draft.server, draft.folderID)
+
+          if (folder) sessionFolders.move(session.server, session.sessionId, folder.project, folder.id)
+        }
+
         // Keep the replacement and navigation atomic so /new-session never renders
         // after its backing draft tab has been removed from the store.
         const active = location.pathname === "/new-session" && location.query.draftId === draftID
@@ -380,6 +401,13 @@ export const { use: useTabs, provider: TabsProvider } = createSimpleContext({
       ) {
         // Snapshot the draft before replacing its store entry; keep its composer alive for rollback.
         const draft = { ...actions.draft(draftID) }
+
+        if (draft.folderID) {
+          const folder = sessionFolders.get(draft.server, draft.folderID)
+
+          if (folder) sessionFolders.move(session.server, session.sessionId, folder.project, folder.id)
+        }
+
         const next = { type: "session" as const, ...session }
         const key = tabKey(next)
         const composer = createMemoryComposerState()
@@ -605,7 +633,12 @@ export const { use: useTabs, provider: TabsProvider } = createSimpleContext({
           current.prompted === next.prompted
         )
           return
-        console.debug("[tabs] update persisted session info", { key, sessionID: session.id, current, next })
+        console.debug("[tabs] update persisted session info", {
+          key,
+          sessionID: session.id,
+          current,
+          next,
+        })
         setInfo(key, next)
       },
       select: navigateTab,
@@ -693,6 +726,18 @@ export const { use: useTabs, provider: TabsProvider } = createSimpleContext({
       },
     }
 
-    return { ...actions, store, info, closed, ready, infoReady, recentReady, closedReady, regionsReady, sessionPins }
+    return {
+      ...actions,
+      store,
+      info,
+      closed,
+      ready,
+      infoReady,
+      recentReady,
+      closedReady,
+      regionsReady,
+      sessionPins,
+      sessionFolders,
+    }
   },
 })

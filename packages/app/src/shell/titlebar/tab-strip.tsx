@@ -8,7 +8,7 @@ import { RestrictToHorizontalAxis, RestrictToVerticalAxis } from "@dnd-kit/abstr
 import { RestrictToElement } from "@dnd-kit/dom/modifiers"
 import { arrayMove } from "@/runtime/array-move"
 import { tabHref, tabKey, type SessionTab, type Tab } from "@/shell/tabs/tabs"
-import { ServerConnection } from "@/runtime/server/registry"
+import { ServerConnection, useServers } from "@/runtime/server/registry"
 import { DraftTabItem, TabNavItem } from "@/shell/titlebar/tab-nav"
 import { useGlobal, useServerCtx, type ServerCtx } from "@/runtime/server/runtime"
 import { useLanguage } from "@/runtime/i18n/language"
@@ -26,17 +26,39 @@ import { sessionTreeIDs } from "@/session/requests/session-request-tree"
 import { sessionTitle } from "@/session/title"
 import { errorMessage } from "@/shell/layout/helpers"
 import { notifySessionTabsRemoved } from "./session-events"
+import { Icon } from "@opencode/ui/icon"
+import { IconButton } from "@opencode/ui/icon-button"
+import { displayName } from "@opencode/ui/project-avatar"
+import { pathKey } from "@/workspaces/path-key"
+import { FolderNameDialog, SessionFolderGroup } from "./session-folders"
+import {
+  SessionDropTarget,
+  sessionDropKey,
+  sessionPointerCollision,
+  type SessionDropDestination,
+  type SessionDropPreview,
+} from "./session-drop-target"
 import { setSidebarUnread } from "@/shell/sidebar-peek"
 import type { SessionInfo } from "@opencode/client/promise"
+import { Schema } from "effect"
+import { Persist, persisted } from "@/runtime/persistence/storage"
+import { Persistence } from "@/runtime/persistence/schema"
 
-export const previousSessionCommand = { id: "session.previous", keybind: "alt+arrowup" }
+export const previousSessionCommand = {
+  id: "session.previous",
+  keybind: "alt+arrowup",
+}
 
-export const nextSessionCommand = { id: "session.next", keybind: "alt+arrowdown" }
+export const nextSessionCommand = {
+  id: "session.next",
+  keybind: "alt+arrowdown",
+}
 
 function SessionTabSlot(props: {
   tab: SessionTab
   id: string
   index: number
+  group: string
   active: boolean
   orientation: "horizontal" | "vertical"
   session: SessionInfo | undefined
@@ -61,6 +83,14 @@ function SessionTabSlot(props: {
     get index() {
       return props.index
     },
+    get group() {
+      return props.group
+    },
+    get data() {
+      return { sessionTabGroup: props.group }
+    },
+    accept: (source) => source.data.sessionTabGroup === props.group,
+    collisionDetector: sessionPointerCollision,
   })
 
   let ref!: HTMLDivElement
@@ -111,9 +141,11 @@ function SessionTabSlot(props: {
 function SessionTabEntry(props: {
   tab: SessionTab
   pinned?: boolean
+  retained?: boolean
   currentTab?: Tab
   id: string
   index: number
+  group: string
   active: boolean
   orientation: "horizontal" | "vertical"
   serverCtx: ServerCtx | undefined
@@ -142,7 +174,7 @@ function SessionTabEntry(props: {
 
   const [loadedSession] = createResource(
     () => {
-      if (pending() || (!props.pinned && !props.active && persisted()?.title)) return null
+      if (pending() || (!props.pinned && !props.retained && !props.active && persisted()?.title)) return null
       const ctx = props.serverCtx
 
       return ctx ? { id: props.tab.sessionId, ctx } : null
@@ -164,7 +196,9 @@ function SessionTabEntry(props: {
   const missingSession = createMemo(() => !pending() && !!props.serverCtx && !loadedSession.loading && !session())
 
   const visible = createMemo(() => {
-    if (props.pinned) return !!session() && !session()?.time.archived && !session()?.parentID
+    if (pending()) return true
+
+    if (props.pinned || props.retained) return !!session() && !session()?.time.archived && !session()?.parentID
 
     return !!pending() || !!session() || missingSession() || !!persisted()?.title
   })
@@ -221,7 +255,11 @@ function SessionTabEntry(props: {
 
       try {
         await ctx.data.session.remove(value.id)
-        notifySessionTabsRemoved({ server: props.tab.server, directory: value.location.directory, sessionIDs: ids })
+        notifySessionTabsRemoved({
+          server: props.tab.server,
+          directory: value.location.directory,
+          sessionIDs: ids,
+        })
       } catch (cause) {
         showToast({
           title: language.t("session.delete.failed.title"),
@@ -343,6 +381,7 @@ function SessionTabEntry(props: {
         tab={props.tab}
         id={props.id}
         index={props.index}
+        group={props.group}
         active={props.active}
         orientation={props.orientation}
         session={session()}
@@ -372,6 +411,7 @@ function DraftTabSlot(props: {
   tab: Extract<Tab, { type: "draft" }>
   id: string
   index: number
+  group: string
   active: boolean
   orientation: "horizontal" | "vertical"
   title: string
@@ -385,6 +425,14 @@ function DraftTabSlot(props: {
     get index() {
       return props.index
     },
+    get group() {
+      return props.group
+    },
+    get data() {
+      return { sessionTabGroup: props.group }
+    },
+    accept: (source) => source.data.sessionTabGroup === props.group,
+    collisionDetector: sessionPointerCollision,
   })
 
   let ref!: HTMLDivElement
@@ -429,9 +477,54 @@ export function TitlebarTabStrip(props: {
   const global = useGlobal()
   const language = useLanguage()
   const command = useCommand()
-  const pins = useTabs().sessionPins
+  const tabs = useTabs()
+  const pins = tabs.sessionPins
+  const folders = tabs.sessionFolders
+  const dialog = useDialog()
+  const servers = useServers()
+
+  const [sections, setSections, , sectionsReady] = persisted(
+    Persist.window("session-sections.v1"),
+    Persistence.struct({ collapsed: Persistence.record(Schema.Boolean) }),
+    { collapsed: {} },
+  )
+
+  const sectionKey = (server: ServerConnection.Key, directory: string, kind: "project" | "unfiled") =>
+    JSON.stringify([servers.scope(server), pathKey(directory), kind])
+
+  const toggleSection = (key: string) => {
+    if (sectionsReady()) setSections("collapsed", key, !sections.collapsed[key])
+  }
+
   const vertical = () => props.orientation === "vertical"
-  const pinned = (tab: Tab) => vertical() && tab.type === "session" && pins.isPinned(tab.server, tab.sessionId)
+
+  const actualProjectFor = (tab: Tab) => {
+    const ctx = global.serverCtx(tab.server)
+    const session = tab.type === "session" ? ctx?.data.session.get(tab.sessionId) : undefined
+
+    const directory =
+      tab.type === "draft" ? tab.directory : (session?.location.directory ?? tabs.info[tabKey(tab)]?.directory)
+
+    const project = session
+      ? ctx?.projects.forSession(session)
+      : directory
+        ? ctx?.projects.forDirectory(directory)
+        : undefined
+
+    return project?.worktree ?? directory
+  }
+
+  const folderFor = (tab: Tab) => {
+    const folder =
+      tab.type === "draft" ? folders.get(tab.server, tab.folderID) : folders.folder(tab.server, tab.sessionId)
+
+    const project = actualProjectFor(tab)
+
+    return folder && (!project || pathKey(project) === pathKey(folder.project)) ? folder : undefined
+  }
+
+  const pinned = (tab: Tab) =>
+    vertical() && tab.type === "session" && pins.isPinned(tab.server, tab.sessionId) && !folderFor(tab)
 
   const pinnedTabs = createMemo(() =>
     !vertical() || !pins.ready()
@@ -439,7 +532,26 @@ export function TitlebarTabStrip(props: {
       : global.servers.list().flatMap((conn) => {
           const server = ServerConnection.key(conn)
 
-          return pins.ids(server).map((sessionId): SessionTab => {
+          return pins
+            .ids(server)
+            .filter((id) => !folders.folder(server, id))
+            .map((sessionId): SessionTab => {
+              const open = props.tabs.find(
+                (tab) => tab.type === "session" && tab.server === server && tab.sessionId === sessionId,
+              )
+
+              return open?.type === "session" ? open : { type: "session", server, sessionId }
+            })
+        }),
+  )
+
+  const folderTabs = createMemo(() =>
+    !vertical() || !folders.ready()
+      ? []
+      : global.servers.list().flatMap((conn) => {
+          const server = ServerConnection.key(conn)
+
+          return folders.ids(server).map((sessionId): SessionTab => {
             const open = props.tabs.find(
               (tab) => tab.type === "session" && tab.server === server && tab.sessionId === sessionId,
             )
@@ -449,8 +561,92 @@ export function TitlebarTabStrip(props: {
         }),
   )
 
-  const ordinaryTabs = createMemo(() => props.tabs.filter((tab) => !pinned(tab)))
-  const orderedTabs = createMemo(() => [...pinnedTabs(), ...ordinaryTabs()])
+  const ordinaryTabs = createMemo(() => {
+    const entries = new Map(props.tabs.filter((tab) => !pinned(tab)).map((tab) => [tabKey(tab), tab]))
+
+    for (const tab of folderTabs()) if (!pinned(tab) && !entries.has(tabKey(tab))) entries.set(tabKey(tab), tab)
+
+    return [...entries.values()]
+  })
+
+  const projectFor = (tab: Tab) =>
+    actualProjectFor(tab) ??
+    folderFor(tab)?.project ??
+    (tab.type === "session" ? folders.project(tab.server, tab.sessionId) : undefined)
+
+  const destinationFor = (tab: Tab): SessionDropDestination | undefined => {
+    const project = projectFor(tab)
+
+    return project ? { server: tab.server, project, folderID: folderFor(tab)?.id } : undefined
+  }
+
+  const groupFor = (tab: Tab) =>
+    !vertical()
+      ? "tabs"
+      : pinned(tab)
+        ? `pinned:${tab.server}`
+        : sessionDropKey(destinationFor(tab) ?? { server: tab.server, project: "" })
+
+  const projectViews = new Map<
+    string,
+    { server: ServerConnection.Key; directory: string; readonly name: string; readonly tabs: Tab[] }
+  >()
+
+  const projects = createMemo(() =>
+    global.servers.list().flatMap((conn) => {
+      const server = ServerConnection.key(conn)
+      const ctx = global.serverCtx(server)
+
+      const directories = new Set([
+        ...(ctx?.projects.used().map((project) => project.worktree) ?? []),
+        ...folders.list(server).map((folder) => folder.project),
+        ...ordinaryTabs().flatMap((tab) => (tab.server === server ? (projectFor(tab) ?? []) : [])),
+      ])
+
+      return [...directories].flatMap((directory) => {
+        if (ctx?.projects.hidden(directory)) return []
+
+        const key = JSON.stringify([server, directory])
+        const existing = projectViews.get(key)
+
+        if (existing) return [existing]
+
+        const view = {
+          server,
+          directory,
+          get name() {
+            return displayName(ctx?.projects.forDirectory(directory) ?? { worktree: directory })
+          },
+          get tabs() {
+            return ordinaryTabs().filter(
+              (tab) => tab.server === server && pathKey(projectFor(tab) ?? "") === pathKey(directory),
+            )
+          },
+        }
+
+        projectViews.set(key, view)
+
+        return [view]
+      })
+    }),
+  )
+
+  const orderedTabs = createMemo(() =>
+    !vertical()
+      ? ordinaryTabs()
+      : [
+          ...pinnedTabs(),
+          ...projects().flatMap((project) => [
+            ...folders
+              .list(project.server)
+              .filter((folder) => folder.project === project.directory)
+              .flatMap((folder) => project.tabs.filter((tab) => folderFor(tab)?.id === folder.id)),
+            ...project.tabs.filter((tab) => !folderFor(tab)),
+          ]),
+          ...ordinaryTabs().filter((tab) => !projectFor(tab)),
+        ],
+  )
+
   let listRef!: HTMLDivElement
   let scrollRef!: HTMLDivElement
   // Each vertical edge feathers by as much as there is left to scroll past it, so it appears and leaves without a jump.
@@ -470,7 +666,26 @@ export function TitlebarTabStrip(props: {
   })
   const [visibility, setVisibility] = createStore<Record<string, boolean>>({})
   const [unread, setUnread] = createStore<Record<string, boolean>>({})
-  const visibleTabs = createMemo(() => orderedTabs().filter((tab) => tab.type === "draft" || visibility[tabKey(tab)]))
+
+  const visibleTabs = createMemo(() =>
+    orderedTabs().filter((tab) => {
+      if (tab.type !== "draft" && !visibility[tabKey(tab)]) return false
+
+      if (!vertical()) return true
+
+      if (pinned(tab)) return !sections.collapsed.pinned
+
+      if (folderFor(tab)?.collapsed) return false
+      const directory = projectFor(tab)
+
+      if (!directory) return true
+
+      if (sections.collapsed[sectionKey(tab.server, directory, "project")]) return false
+
+      return !!folderFor(tab) || !sections.collapsed[sectionKey(tab.server, directory, "unfiled")]
+    }),
+  )
+
   const visibleTabIds = () => visibleTabs().map(tabKey)
 
   // Tells the closed sidebar's toggle whether any row here shows its unread dot, which the current tab never does.
@@ -553,7 +768,12 @@ export function TitlebarTabStrip(props: {
   const renderTab = (tab: Tab) => {
     const id = tabKey(tab)
     let ref!: HTMLDivElement
-    const visibleIndex = () => visibleTabs().findIndex((item) => tabKey(item) === id)
+
+    const visibleIndex = () =>
+      visibleTabs()
+        .filter((item) => groupFor(item) === groupFor(tab))
+        .findIndex((item) => tabKey(item) === id)
+
     const element = () => ref
     tabRefs.set(id, element)
     onCleanup(() => {
@@ -570,10 +790,12 @@ export function TitlebarTabStrip(props: {
       return (
         <SessionTabEntry
           tab={tab}
-          pinned={pinned(tab)}
+          pinned={vertical() && pins.isPinned(tab.server, tab.sessionId)}
+          retained={vertical() && folderTabs().some((item) => tabKey(item) === id)}
           currentTab={props.currentTab}
           id={id}
           index={visibleIndex()}
+          group={groupFor(tab)}
           active={!!props.currentTab && tabKey(props.currentTab) === id}
           orientation={vertical() ? "vertical" : "horizontal"}
           serverCtx={serverCtx()}
@@ -593,6 +815,7 @@ export function TitlebarTabStrip(props: {
         tab={tab}
         id={id}
         index={visibleIndex()}
+        group={groupFor(tab)}
         active={!!props.currentTab && tabKey(props.currentTab) === id}
         orientation={vertical() ? "vertical" : "horizontal"}
         title={language.t("session.tab.session")}
@@ -603,6 +826,203 @@ export function TitlebarTabStrip(props: {
         onClose={() => props.onClose(tab)}
       />
     )
+  }
+
+  const [drag, setDrag] = createStore<{
+    source?: string
+    target?: SessionDropDestination
+    targetID?: string
+    row: boolean
+  }>({
+    row: false,
+  })
+
+  const [moving, setMoving] = createStore<Record<string, SessionDropDestination | undefined>>({})
+
+  const destinationLabel = (destination: SessionDropDestination) => {
+    const project = global.serverCtx(destination.server)?.projects.forDirectory(destination.project)
+    const name = displayName(project ?? { worktree: destination.project })
+
+    return `${name} › ${folders.get(destination.server, destination.folderID)?.name ?? language.t("session.folders.none")}`
+  }
+
+  const busy = (tab: SessionTab) => {
+    const ctx = global.serverCtx(tab.server)
+
+    return (
+      !!tabs.pendingSession(tab.server, tab.sessionId) ||
+      (!!ctx &&
+        [tab.sessionId, ...ctx.data.session.family(tab.sessionId)].some(
+          (id) => ctx.data.session.status(id) === "running" || ctx.data.session.pending.list(id).length > 0,
+        ))
+    )
+  }
+
+  const previewFor = (tab: Tab, destination: SessionDropDestination, row = false): SessionDropPreview => {
+    const label = destinationLabel(destination)
+    const cross = pathKey(projectFor(tab) ?? "") !== pathKey(destination.project)
+    const unchanged = !cross && folderFor(tab)?.id === destination.folderID
+    const ctx = global.serverCtx(tab.server)
+
+    const reason =
+      tab.server !== destination.server
+        ? language.t("session.move.server")
+        : moving[tabKey(tab)]
+          ? language.t("session.move.pending")
+          : cross && tab.type === "session" && busy(tab)
+            ? language.t("session.move.busy")
+            : cross && tab.type === "session" && !ctx?.data.session.get(tab.sessionId)
+              ? language.t("session.move.loading")
+              : cross && tab.type === "session" && ctx?.sdk.connection.status() !== "connected"
+                ? language.t("session.move.disconnected")
+                : undefined
+
+    return {
+      key: sessionDropKey(destination),
+      label,
+      allowed: !reason,
+      unchanged,
+      message:
+        reason ??
+        language.t(unchanged ? (row ? "session.move.reorder" : "session.move.unchanged") : "session.move.preview", {
+          destination: label,
+        }),
+    }
+  }
+
+  const dragPreview = createMemo(() => {
+    const tab = orderedTabs().find((item) => tabKey(item) === drag.source)
+
+    return tab && drag.target
+      ? {
+          ...previewFor(tab, drag.target, drag.row),
+          key: drag.targetID ?? `session-folder:${sessionDropKey(drag.target)}`,
+        }
+      : undefined
+  })
+
+  const dragChangesContext = () => {
+    const tab = orderedTabs().find((item) => tabKey(item) === drag.source)
+
+    return !!tab && !!drag.target && pathKey(projectFor(tab) ?? "") !== pathKey(drag.target.project)
+  }
+
+  const expandDestination = (destination: SessionDropDestination) => {
+    setSections("collapsed", sectionKey(destination.server, destination.project, "project"), false)
+
+    if (!destination.folderID)
+      setSections("collapsed", sectionKey(destination.server, destination.project, "unfiled"), false)
+    const folder = folders.get(destination.server, destination.folderID)
+
+    if (folder?.collapsed) folders.collapse(destination.server, folder.id)
+  }
+
+  createEffect(() => {
+    for (const [key, destination] of Object.entries(moving)) {
+      if (!destination) continue
+      const tab = orderedTabs().find((item) => tabKey(item) === key)
+
+      if (!tab || tab.type !== "session") continue
+      const ctx = global.serverCtx(tab.server)
+      const info = ctx?.data.session.get(tab.sessionId)
+
+      if (!info || pathKey(info.location.directory) !== pathKey(destination.project)) continue
+      const folder = folders.get(tab.server, destination.folderID)
+      folders.move(
+        tab.server,
+        tab.sessionId,
+        destination.project,
+        folder?.project === destination.project ? folder.id : undefined,
+      )
+      ctx?.projects.touch(destination.project)
+      expandDestination(destination)
+      setMoving(key, undefined)
+      showToast({ title: language.t("session.move.completed", { destination: destinationLabel(destination) }) })
+    }
+  })
+
+  const moveTo = async (tab: Tab, destination: SessionDropDestination) => {
+    const preview = previewFor(tab, destination)
+
+    if (!preview.allowed) {
+      showToast({ title: language.t("session.move.failed"), description: preview.message })
+
+      return
+    }
+
+    if (preview.unchanged) return
+    const cross = pathKey(projectFor(tab) ?? "") !== pathKey(destination.project)
+
+    if (tab.type === "draft") {
+      tabs.updateDraft(
+        tab.draftID,
+        cross
+          ? {
+              directory: destination.project,
+              folderID: destination.folderID,
+              worktree: undefined,
+              branch: undefined,
+              mcp: undefined,
+            }
+          : { folderID: destination.folderID },
+      )
+      expandDestination(destination)
+
+      return
+    }
+
+    if (!cross) {
+      folders.move(tab.server, tab.sessionId, destination.project, destination.folderID)
+      expandDestination(destination)
+
+      return
+    }
+
+    const ctx = global.serverCtx(tab.server)
+
+    if (!ctx) return
+    const key = tabKey(tab)
+    setMoving(key, destination)
+
+    try {
+      await ctx.data.session.sync(tab.sessionId, { children: true })
+
+      const [active, pending] = await Promise.all([
+        ctx.sdk.api.session.active(),
+        ctx.sdk.api.session.inbox.list({ sessionID: tab.sessionId }),
+      ])
+
+      if (
+        busy(tab) ||
+        pending.length ||
+        [tab.sessionId, ...ctx.data.session.family(tab.sessionId)].some((id) => active[id])
+      ) {
+        setMoving(key, undefined)
+        showToast({ title: language.t("session.move.failed"), description: language.t("session.move.busy") })
+
+        return
+      }
+
+      await ctx.sdk.api.session.move({ sessionID: tab.sessionId, directory: destination.project, delivery: "queue" })
+      const info = await ctx.sdk.api.session.get({ sessionID: tab.sessionId }).catch(() => undefined)
+
+      if (info) ctx.data.session.remember(info)
+    } catch (error) {
+      if (!moving[key]) return
+      setMoving(key, undefined)
+      showToast({
+        title: language.t("session.move.failed"),
+        description: errorMessage(error, language.t("session.move.failed")),
+      })
+    }
+  }
+
+  const pendingMove = () => Object.values(moving).find((destination) => !!destination)
+
+  const pendingMoveLabel = () => {
+    const destination = pendingMove()
+
+    return destination ? destinationLabel(destination) : ""
   }
 
   return (
@@ -622,7 +1042,10 @@ export function TitlebarTabStrip(props: {
         }}
         style={
           vertical()
-            ? { "--vertical-tabs-fade-top": `${fade.top}px`, "--vertical-tabs-fade-bottom": `${fade.bottom}px` }
+            ? {
+                "--vertical-tabs-fade-top": `${fade.top}px`,
+                "--vertical-tabs-fade-bottom": `${fade.bottom}px`,
+              }
             : undefined
         }
         onScroll={() => {
@@ -649,35 +1072,127 @@ export function TitlebarTabStrip(props: {
           ]}
           plugins={(defaults) => [
             ...defaults.filter((plugin) => plugin !== Accessibility),
-            AutoScroller.configure({ acceleration: 8, threshold: vertical() ? { x: 0, y: 0.05 } : { x: 0.05, y: 0 } }),
+            AutoScroller.configure({
+              acceleration: 8,
+              threshold: vertical() ? { x: 0, y: 0.05 } : { x: 0.05, y: 0 },
+            }),
             Feedback.configure({ dropAnimation: null }),
           ]}
           onDragStart={(event) => {
             const source = event.operation.source
 
             if (!source) return
-            const tab = props.tabs.find((item) => tabKey(item) === source.id.toString())
+            const tab = orderedTabs().find((item) => tabKey(item) === source.id.toString())
 
             if (!tab) return
+            setDrag({ source: tabKey(tab), target: undefined, targetID: undefined, row: false })
 
-            if (vertical()) return
+            if (vertical()) {
+              if (tab.type === "session")
+                void global
+                  .serverCtx(tab.server)
+                  ?.data.session.sync(tab.sessionId, { children: true })
+                  .catch(() => undefined)
+
+              return
+            }
+
             const tabEl = source.element?.querySelector<HTMLDivElement>("[data-titlebar-tab]")
             props.onNavigate(tab, tabEl ?? undefined)
+          }}
+          onDragOver={(event) => {
+            if (!vertical()) return
+            const target = event.operation.target
+            const over = orderedTabs().find((item) => tabKey(item) === target?.id.toString())
+
+            const destination: SessionDropDestination | undefined = target?.data.sessionFolder
+              ? target.data.destination
+              : over
+                ? destinationFor(over)
+                : undefined
+
+            setDrag({
+              target: destination,
+              targetID: target?.data.sessionFolder ? target.id.toString() : undefined,
+              row: !!over,
+            })
+
+            event.preventDefault()
           }}
           onDragEnd={(event) => {
             const current = visibleTabIds()
             const source = event.operation.source
+            const target = event.operation.target
+            const tab = orderedTabs().find((item) => tabKey(item) === source?.id.toString())
+            const over = orderedTabs().find((item) => tabKey(item) === target?.id.toString())
 
-            if (event.canceled || !isSortable(source)) return
+            const destination: SessionDropDestination | undefined = target?.data.sessionFolder
+              ? target.data.destination
+              : over
+                ? destinationFor(over)
+                : drag.target
 
-            const { initialIndex, index } = source
+            setDrag({ source: undefined, target: undefined, targetID: undefined, row: false })
 
-            if (initialIndex !== index) {
-              const moved = arrayMove(current, source.initialIndex, source.index)
-              const from = orderedTabs().find((tab) => tabKey(tab) === current[initialIndex])
-              const to = orderedTabs().find((tab) => tabKey(tab) === current[index])
+            if (event.canceled || !source || !tab || !target) return
+
+            if (event.nativeEvent instanceof PointerEvent) {
+              const element = target.data.sessionFolder
+                ? target.element
+                : vertical()
+                  ? (target.element?.closest('[role="group"]') ?? listRef)
+                  : listRef
+
+              const rect = element?.getBoundingClientRect()
+              const point = event.nativeEvent
+
+              if (
+                !rect ||
+                point.clientX < rect.left ||
+                point.clientX > rect.right ||
+                point.clientY < rect.top ||
+                point.clientY > rect.bottom
+              )
+                return
+            }
+
+            if (vertical() && destination) {
+              if (!over || groupFor(tab) !== groupFor(over)) {
+                void moveTo(tab, destination)
+
+                return
+              }
+
+              if (!previewFor(tab, destination).allowed) return
+            }
+
+            if (!isSortable(source)) return
+
+            const group = vertical()
+              ? current.filter((key) => {
+                  const item = orderedTabs().find((entry) => tabKey(entry) === key)
+
+                  return item && groupFor(item) === groupFor(tab)
+                })
+              : current
+
+            const initialIndex = vertical() ? group.indexOf(tabKey(tab)) : source.initialIndex
+            const index = vertical() && over ? group.indexOf(tabKey(over)) : source.index
+
+            if (initialIndex >= 0 && index >= 0 && initialIndex !== index) {
+              const moved = arrayMove(group, initialIndex, index)
+              const from = orderedTabs().find((tab) => tabKey(tab) === group[initialIndex])
+              const to = orderedTabs().find((tab) => tabKey(tab) === group[index])
 
               if (!from || !to || pinned(from) !== pinned(to)) return
+
+              if (
+                vertical() &&
+                (from.server !== to.server ||
+                  projectFor(from) !== projectFor(to) ||
+                  folderFor(from)?.id !== folderFor(to)?.id)
+              )
+                return
 
               if (pinned(from)) {
                 const sessions = moved.flatMap((key) => pinnedTabs().find((tab) => tabKey(tab) === key) ?? [])
@@ -696,7 +1211,7 @@ export function TitlebarTabStrip(props: {
               props.onReorder(
                 mergeVisibleTabOrder(
                   props.tabs.map(tabKey),
-                  current.filter((key) => ordinaryTabs().some((tab) => tabKey(tab) === key)),
+                  group.filter((key) => ordinaryTabs().some((tab) => tabKey(tab) === key)),
                   moved.filter((key) => ordinaryTabs().some((tab) => tabKey(tab) === key)),
                 ),
               )
@@ -707,24 +1222,180 @@ export function TitlebarTabStrip(props: {
             data-titlebar-tab-list
             data-orientation={vertical() ? "vertical" : "horizontal"}
             class="flex w-full min-w-0"
-            classList={{ "flex-row items-center": !vertical(), "flex-col items-stretch": vertical() }}
+            classList={{
+              "flex-row items-center": !vertical(),
+              "flex-col items-stretch": vertical(),
+            }}
             ref={listRef}
           >
             <Show when={vertical()} fallback={<For each={ordinaryTabs()}>{renderTab}</For>}>
               <div role="group" aria-label={language.t("home.sessions.group.pinned")} class="flex flex-col gap-1">
-                <div class="px-2 py-1 text-[12px] leading-4 text-v2-text-text-faint">
+                <button
+                  type="button"
+                  class="flex items-center gap-1.5 px-2 py-1 text-start text-[12px] leading-4 text-v2-text-text-faint"
+                  aria-expanded={!sections.collapsed.pinned}
+                  disabled={!sectionsReady()}
+                  onClick={() => toggleSection("pinned")}
+                >
+                  <Icon name={sections.collapsed.pinned ? "chevron-right" : "chevron-down"} size="small" />
                   {language.t("home.sessions.group.pinned")}
+                </button>
+                <div class="flex flex-col gap-1" style={{ display: sections.collapsed.pinned ? "none" : undefined }}>
+                  <For each={pinnedTabs()}>{renderTab}</For>
                 </div>
-                <For each={pinnedTabs()}>{renderTab}</For>
               </div>
               <div role="group" aria-label={language.t("titlebar.tabs")} class="flex flex-col gap-1">
                 <div class="px-2 py-1 text-[12px] leading-4 text-v2-text-text-faint">{language.t("titlebar.tabs")}</div>
-                <For each={ordinaryTabs()}>{renderTab}</For>
+                <For each={projects()}>
+                  {(project) => (
+                    <section aria-label={project.name} class="flex flex-col gap-1">
+                      <SessionDropTarget
+                        kind="project"
+                        destination={{ server: project.server, project: project.directory }}
+                        preview={dragPreview()}
+                      >
+                        <div class="flex items-center px-2 py-1 text-[12px] leading-4 text-v2-text-text-faint">
+                          <button
+                            type="button"
+                            class="flex min-w-0 flex-1 items-center gap-1.5 text-start"
+                            title={project.directory}
+                            aria-expanded={
+                              !sections.collapsed[sectionKey(project.server, project.directory, "project")]
+                            }
+                            disabled={!sectionsReady()}
+                            onClick={() => toggleSection(sectionKey(project.server, project.directory, "project"))}
+                          >
+                            <Icon
+                              name={
+                                sections.collapsed[sectionKey(project.server, project.directory, "project")]
+                                  ? "chevron-right"
+                                  : "chevron-down"
+                              }
+                              size="small"
+                            />
+                            <span class="truncate">{project.name}</span>
+                          </button>
+                          <IconButton
+                            size="small"
+                            variant="ghost-muted"
+                            aria-label={language.t("session.projects.removeIn", { project: project.name })}
+                            title={language.t("session.projects.remove.description")}
+                            icon={<Icon name="trash" />}
+                            onClick={() => {
+                              const ctx = global.serverCtx(project.server)
+
+                              if (!ctx) return
+                              ctx.projects.hide({ worktree: project.directory })
+                              showToast({
+                                title: language.t("session.projects.removed"),
+                                description: language.t("session.projects.remove.description"),
+                                actions: [
+                                  {
+                                    label: language.t("session.projects.undo"),
+                                    onClick: () => ctx.projects.touch(project.directory),
+                                  },
+                                ],
+                              })
+                            }}
+                          />
+                          <IconButton
+                            size="small"
+                            variant="ghost-muted"
+                            disabled={!folders.ready()}
+                            aria-label={language.t("session.folders.createIn", {
+                              project: project.name,
+                            })}
+                            icon={<Icon name="plus-small" />}
+                            onClick={() =>
+                              dialog.show(() => (
+                                <FolderNameDialog server={project.server} project={project.directory} />
+                              ))
+                            }
+                          />
+                        </div>
+                      </SessionDropTarget>
+                      <div
+                        class="flex flex-col gap-1 pl-4"
+                        style={{
+                          display: sections.collapsed[sectionKey(project.server, project.directory, "project")]
+                            ? "none"
+                            : undefined,
+                        }}
+                      >
+                        <For
+                          each={folders.list(project.server).filter((folder) => folder.project === project.directory)}
+                        >
+                          {(folder) => (
+                            <SessionFolderGroup
+                              server={project.server}
+                              project={project.directory}
+                              id={folder.id}
+                              preview={dragPreview()}
+                            >
+                              <For each={project.tabs.filter((tab) => folderFor(tab)?.id === folder.id)}>
+                                {renderTab}
+                              </For>
+                            </SessionFolderGroup>
+                          )}
+                        </For>
+                        <SessionFolderGroup
+                          server={project.server}
+                          project={project.directory}
+                          preview={dragPreview()}
+                          collapsed={sections.collapsed[sectionKey(project.server, project.directory, "unfiled")]}
+                          onToggle={() => toggleSection(sectionKey(project.server, project.directory, "unfiled"))}
+                        >
+                          <For each={project.tabs.filter((tab) => !folderFor(tab))}>{renderTab}</For>
+                        </SessionFolderGroup>
+                      </div>
+                    </section>
+                  )}
+                </For>
+                <For each={ordinaryTabs().filter((tab) => !projectFor(tab))}>{renderTab}</For>
               </div>
             </Show>
           </div>
         </DragDropProvider>
       </div>
+      <Show when={vertical() && (dragPreview() || pendingMove())}>
+        <div
+          role="status"
+          aria-live="polite"
+          class="pointer-events-none absolute inset-x-2 bottom-2 z-30 rounded-md border border-v2-border-border-base bg-v2-background-bg-deep px-3 py-2 text-[12px] leading-4 shadow-lg"
+        >
+          <Show
+            when={dragPreview()}
+            fallback={language.t("session.move.moving", {
+              destination: pendingMoveLabel(),
+            })}
+          >
+            {(preview) => (
+              <>
+                <div class="font-medium" classList={{ "text-v2-state-fg-error": !preview().allowed }}>
+                  {language.t(
+                    preview().allowed
+                      ? preview().unchanged
+                        ? drag.row
+                          ? "session.move.reorder"
+                          : "session.move.unchanged"
+                        : "session.move.preview"
+                      : "session.move.blocked",
+                    { destination: preview().label },
+                  )}
+                </div>
+                <Show when={!preview().allowed}>
+                  <div class="mt-1 text-v2-text-text-faint">{preview().message}</div>
+                </Show>
+                <Show when={preview().allowed && dragChangesContext()}>
+                  <div class="mt-1 break-all text-v2-text-text-faint">
+                    {language.t("session.move.context", { directory: drag.target?.project ?? "" })}
+                  </div>
+                </Show>
+              </>
+            )}
+          </Show>
+        </div>
+      </Show>
       <Show when={!vertical()}>
         <div
           data-slot="titlebar-tabs-fade-left"

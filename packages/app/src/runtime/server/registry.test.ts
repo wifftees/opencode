@@ -154,3 +154,76 @@ test("used and last projects follow dynamic server scopes, and migration consume
   expect(store.lastProjectID).toEqual({ local: "a", [props.server]: "remote-project" })
   expect(store.usedProjectIDs).toEqual({ local: ["a"], [props.server]: ["remote-project"] })
 })
+
+test("hidden project paths normalize separators and persist independently of project usage", () => {
+  const schema = serverSchema()
+  const [store, setStore] = createStore(Schema.decodeUnknownSync(schema)({}))
+  const projects = createServerProjects({ store, setStore, scope: () => ServerScope.local })
+
+  projects.touch("shared", "C:/Projects/Hidden")
+  projects.touch("shared", "C:/Projects/Other")
+  projects.hide(["shared"], "C:\\Projects\\Hidden\\")
+  expect(projects.hidden("C:/Projects/Hidden/")).toBe(true)
+  expect(projects.hidden("C:/Projects/Other")).toBe(false)
+  expect(projects.used()).toEqual([])
+  projects.touch("shared")
+  expect(projects.hidden("C:/Projects/Hidden")).toBe(true)
+  projects.touch("shared", "C:/Projects/Other")
+  expect(projects.hidden("C:/Projects/Hidden")).toBe(true)
+  const restored = Schema.decodeUnknownSync(schema)(Schema.encodeSync(schema)(store))
+  const [restoredStore, setRestoredStore] = createStore(restored)
+  const reopened = createServerProjects({ store: restoredStore, setStore: setRestoredStore, scope: () => ServerScope.local })
+
+  expect(reopened.hidden("C:\\Projects\\Hidden")).toBe(true)
+  expect(reopened.hidden("C:/Projects/Other")).toBe(false)
+  reopened.touch("shared", "C:/Projects/Hidden/")
+  expect(reopened.hidden("C:\\Projects\\Hidden\\")).toBe(false)
+  expect(reopened.used()).toEqual(["shared"])
+  expect(reopened.last()).toBe("shared")
+})
+
+test("removing and restoring project paths follows the current server scope without restoring other paths", () => {
+  const [store, setStore] = createStore(Schema.decodeUnknownSync(serverSchema())({}))
+  const remote = ServerScope.fromServerKey(ServerConnection.Key.make("https://remote.example"))
+  let scope = ServerScope.local
+  const projects = createServerProjects({ store, setStore, scope: () => scope })
+
+  projects.touch("same-project", "/projects/shared")
+  projects.hide(["same-project"], "/projects/shared/")
+  projects.hide([], "/projects/other")
+  scope = remote
+  expect(projects.hidden("/projects/shared")).toBe(false)
+  expect(projects.hidden("/projects/other")).toBe(false)
+  projects.touch("same-project", "/projects/shared")
+  projects.hide(["same-project"], "/projects/shared")
+  scope = ServerScope.local
+  projects.touch("same-project", "/projects/shared")
+  expect(projects.hidden("/projects/shared")).toBe(false)
+  expect(projects.hidden("/projects/other")).toBe(true)
+  expect(projects.used()).toEqual(["same-project"])
+  scope = remote
+  expect(projects.hidden("/projects/shared")).toBe(true)
+  expect(projects.used()).toEqual([])
+})
+
+test("show restores a hidden directory without metadata or changing used and last projects", () => {
+  const [store, setStore] = createStore(Schema.decodeUnknownSync(serverSchema())({ lastProjectID: { local: "last-kept" } }))
+  const remote = ServerScope.fromServerKey(ServerConnection.Key.make("https://offline.example"))
+  let scope = ServerScope.local
+  const projects = createServerProjects({ store, setStore, scope: () => scope })
+
+  projects.hide([], "C:\\Projects\\Offline\\")
+  projects.hide([], "C:/Projects/Other")
+  scope = remote
+  projects.hide([], "C:/Projects/Offline")
+  scope = ServerScope.local
+  projects.show("C:/Projects/Offline/")
+  expect(projects.hidden("C:\\Projects\\Offline")).toBe(false)
+  expect(projects.hidden("C:/Projects/Other")).toBe(true)
+  expect(projects.used()).toEqual([])
+  expect(projects.last()).toBe("last-kept")
+  scope = remote
+  expect(projects.hidden("C:/Projects/Offline")).toBe(true)
+  expect(projects.used()).toEqual([])
+  expect(projects.last()).toBeUndefined()
+})

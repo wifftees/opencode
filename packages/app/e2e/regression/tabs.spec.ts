@@ -15,9 +15,9 @@ import {
   sessionHref,
 } from "../utils/app"
 import { openFileLauncher, reviewTabs } from "../utils/side-panel"
-import { mockServers } from "../utils/mock-server"
+import { mockServers, type MockServerConfig } from "../utils/mock-server"
 import { fixture, mockStressTimeline } from "../utils/session-fixture"
-import { fileNode, mockWorkspace, openSession } from "../utils/workspace"
+import { fileNode, mockWorkspace, openSession, newSessionWorktree } from "../utils/workspace"
 import { expectSessionTitle } from "../utils/waits"
 
 const a = { id: "ses_tab_a", title: "Tab A session" }
@@ -1722,6 +1722,444 @@ test("opening a session from the inbox keeps the list's scroll position and rows
   expect(await list.evaluate((element) => element.scrollTop)).toBe(offset)
 })
 
+test("project session folders support validation, drag, collapse, rename, and safe deletion across reload", async ({
+  page,
+}) => {
+  await openSession(page, {
+    name: "SessionFolders",
+    sessions: [a, b],
+    seed: {
+      settings: { appearance: { tabLayout: "vertical" } },
+      storage: { "opencode.global.dat:session-pins.v1": { sessions: { local: { [b.id]: { pinned: true, updated: T0, writer: "seed" } } } } },
+    },
+  })
+  const sidebar = page.locator('[data-slot="vertical-tabs-sidebar"]')
+  const folder = (name: string) => sidebar.getByRole("group", { name, exact: true })
+  const row = (id: string) => sidebar.locator(`[data-titlebar-tab-slot]:has(a[href="${sessionHref(id)}"])`)
+
+  const create = async (name: string) => {
+    await sidebar
+      .getByRole("button", {
+        name: "New folder in SessionFolders",
+        exact: true,
+      })
+      .click()
+    await page.getByRole("textbox", { name: "Folder name", exact: true }).fill(name)
+    await page.getByRole("button", { name: "Save", exact: true }).click()
+  }
+
+  await expect(sidebar.getByRole("button", { name: "Remove project SessionFolders", exact: true }).locator("use")).toHaveAttribute("href", /trash$/)
+  await create(" ")
+
+  const dialog = page.getByRole("dialog")
+
+  const geometry = await dialog.evaluate((element) => {
+    const content = element.querySelector('[data-slot="dialog-content"]') ?? element
+    const form = element.querySelector("form")!
+    const field = element.querySelector("input")!
+
+    return { content: content.getBoundingClientRect().width, form: form.getBoundingClientRect().width, field: field.getBoundingClientRect().width }
+  })
+
+  expect(Math.abs(geometry.content - geometry.form)).toBeLessThanOrEqual(1)
+  expect(geometry.field).toBeGreaterThan(geometry.content * 0.8)
+  await expect(page.getByRole("alert")).toContainText("unique, non-empty")
+  await page.getByRole("textbox", { name: "Folder name", exact: true }).fill("Work")
+  await page.getByRole("button", { name: "Save", exact: true }).click()
+  await expect(folder("Work")).toBeVisible()
+  await create("work")
+  await expect(page.getByRole("alert")).toBeVisible()
+  await page.getByRole("button", { name: "Cancel", exact: true }).click()
+  await create("Later")
+
+  const move = async (id: string, name: string) => {
+    const source = await row(id).boundingBox()
+    const target = await folder(name).getByRole("button", { name, exact: true }).boundingBox()
+
+    if (!source || !target) throw new Error("Folder drag endpoints are missing")
+    await page.mouse.move(source.x + source.width / 2, source.y + source.height / 2)
+    await page.mouse.down()
+    await page.mouse.move(target.x + target.width / 2, target.y + target.height / 2, { steps: 10 })
+    await page.mouse.up()
+    await expect(folder(name).locator(`[data-titlebar-tab-link][href="${sessionHref(id)}"]`)).toBeVisible()
+  }
+
+  await move(b.id, "Work")
+  await move(b.id, "Later")
+  const pinned = sidebar.getByRole("group", { name: "Pinned", exact: true })
+  // An unfiled pinned session returns to Pinned and must not also appear under Without folder.
+  const source = await row(b.id).boundingBox()
+  const target = await folder("Without folder").getByRole("button", { name: "Without folder", exact: true }).boundingBox()
+
+  if (!source || !target) throw new Error("Unfile drag endpoints are missing")
+  await page.mouse.move(source.x + source.width / 2, source.y + source.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(target.x + target.width / 2, target.y + target.height / 2, { steps: 10 })
+  await page.mouse.up()
+  await expect(pinned.locator("[data-titlebar-tab-title]")).toHaveText([b.title])
+  await expect(row(b.id)).toHaveCount(1)
+  await move(b.id, "Work")
+  await row(b.id).click({ button: "right" })
+  await page.getByRole("menuitem", { name: "Unpin session", exact: true }).click()
+  await folder("Work").getByRole("button", { name: "Work", exact: true }).click()
+  await expect(folder("Work").getByRole("button", { name: "Work", exact: true })).toHaveAttribute(
+    "aria-expanded",
+    "false",
+  )
+  await expect(row(b.id)).toBeHidden()
+  await page.reload()
+  await expect(folder("Work").getByRole("button", { name: "Work", exact: true })).toHaveAttribute(
+    "aria-expanded",
+    "false",
+  )
+  await folder("Work").getByRole("button", { name: "Work", exact: true }).click()
+  await expect(folder("Work").locator("[data-titlebar-tab-title]")).toHaveText([b.title])
+  await folder("Work").getByRole("button", { name: "Actions for Work", exact: true }).click()
+  await page.getByRole("menuitem", { name: "Rename", exact: true }).click()
+  await page.getByRole("textbox", { name: "Folder name", exact: true }).fill("Research")
+  await page.getByRole("button", { name: "Save", exact: true }).click()
+  await expect(folder("Research").locator("[data-titlebar-tab-title]")).toHaveText([b.title])
+  await row(b.id).getByRole("button", { name: "Close tab", exact: true }).click()
+  await expect(folder("Research").locator("[data-titlebar-tab-title]")).toHaveText([b.title])
+  await folder("Research").getByRole("button", { name: "Actions for Research", exact: true }).click()
+  await page.getByRole("menuitem", { name: "Delete folder", exact: true }).click()
+  await expect(folder("Research")).toHaveCount(0)
+  await expect(folder("Without folder").locator("[data-titlebar-tab-title]")).toHaveText([a.title, b.title])
+  await page.reload()
+  await expect(folder("Research")).toHaveCount(0)
+  await expect(folder("Without folder").locator("[data-titlebar-tab-title]")).toHaveText([a.title, b.title])
+})
+
+test("new sessions inherit their project folder through draft promotion and reload", async ({ page }) => {
+  const { directory } = await openSession(page, {
+    name: "FolderDraft",
+    onWorktreeCreate: () => undefined,
+    sessions: [a],
+    seed: {
+      settings: { appearance: { tabLayout: "vertical" } },
+      storage: {
+        "opencode.global.dat:session-folders.v1": {
+          folders: {
+            local: {
+              work: {
+                project: "C:/OpenCode/FolderDraft",
+                name: "Work",
+                collapsed: true,
+                deleted: false,
+                updated: T0,
+                writer: "seed",
+              },
+            },
+          },
+          sessions: {},
+        },
+      },
+    },
+  })
+
+  const folder = page.locator('[data-slot="vertical-tabs-sidebar"]').getByRole("group", { name: "Work", exact: true })
+  await folder.getByRole("button", { name: "Actions for Work", exact: true }).click()
+  await page.getByRole("menuitem", { name: "New session in folder", exact: true }).click()
+  await expect(page).toHaveURL(/new-session\?draftId=/)
+  await expect(folder.locator("[data-titlebar-tab-slot]")).toHaveCount(1)
+  const draftID = new URL(page.url()).searchParams.get("draftId")
+  await expect.poll(() => page.evaluate((id) => {
+    const saved = JSON.parse(localStorage.getItem("opencode.window.browser.dat:tabs") ?? "[]")
+
+    return saved.some((tab: { type: string; draftID?: string; folderID?: string }) => tab.type === "draft" && tab.draftID === id && tab.folderID === "work")
+  }, draftID)).toBe(true)
+  await page.reload()
+  await expect(folder.locator("[data-titlebar-tab-slot]")).toHaveCount(1)
+  const editor = page.locator('[data-component="composer-editor"]')
+  await expect(editor).toBeEditable()
+  await newSessionWorktree(page).click()
+  await page.getByRole("option", { name: /^New worktree/ }).click()
+  const worktree = await holdRoute(page, /\/api\/worktree(?:\?|$)/, { method: "POST" })
+  await editor.fill("Folder session prompt")
+  await editor.press("Enter")
+  await worktree.arrived
+  await expect(folder.locator("[data-titlebar-tab-slot]")).toBeVisible()
+  worktree.release()
+  await expect(page).toHaveURL(/\/session\//)
+  const link = folder.locator("[data-titlebar-tab-link]")
+  await expect(link).toHaveCount(1)
+  const href = await link.getAttribute("href")
+  expect(href).toContain("/session/")
+  await page.reload()
+  await expect(folder.locator("[data-titlebar-tab-link]")).toHaveAttribute("href", href!)
+  await expect(page.locator('[data-component="composer-editor"]')).toBeEditable()
+  expect(directory).toBe("C:/OpenCode/FolderDraft")
+})
+
+async function crossProjectSessionMove(
+  page: Page,
+  input: Pick<MockServerConfig, "onSessionMove" | "sessionStatus"> = {},
+) {
+  const directory = "C:/OpenCode/FolderScope"
+  const otherDirectory = "C:/OpenCode/OtherScope"
+  const posted: { directory: string; delivery?: string }[] = []
+  page.on("request", (request) => {
+    if (request.method() === "POST" && new URL(request.url()).pathname === `/api/session/${a.id}/move`)
+      posted.push(request.postDataJSON())
+  })
+
+  const workspace = await openSession(page, {
+    name: "FolderScope",
+    ...input,
+    projects: [
+      project({ id: "proj_folderscope", directory, name: "FolderScope" }),
+      project({ id: "proj_otherscope", directory: otherDirectory, name: "OtherScope" }),
+    ],
+    sessions: [a, { ...b, directory: otherDirectory, projectID: "proj_otherscope" }],
+    pageMessages: pageMessagesFrom({
+      [a.id]: [{ id: "msg_moved_history", type: "user", text: "History before moving", time: { created: T0 } }],
+    }),
+    seed: {
+      settings: { appearance: { tabLayout: "vertical" } },
+      storage: {
+        "opencode.global.dat:session-folders.v1": {
+          folders: { local: {
+            source: { project: directory, name: "Source", collapsed: false, deleted: false, updated: T0, writer: "seed" },
+            work: { project: otherDirectory, name: "Work", collapsed: false, deleted: false, updated: T0, writer: "seed" },
+          } },
+          sessions: { local: { [a.id]: { folder: "source", updated: T0, writer: "seed" } } },
+        },
+      },
+    },
+  })
+
+  const sidebar = page.locator('[data-slot="vertical-tabs-sidebar"]')
+  const original = sidebar.getByRole("region", { name: "FolderScope", exact: true })
+  const other = sidebar.getByRole("region", { name: "OtherScope", exact: true })
+  const source = original.getByRole("group", { name: "Source", exact: true })
+  const destination = other.getByRole("group", { name: "Work", exact: true })
+  const history = page.locator('[data-timeline-row="UserMessage"][data-message-id="msg_moved_history"]')
+  await expect(history).toContainText("History before moving")
+
+  const hoverDestination = async () => {
+    const from = await source.locator(`[data-titlebar-tab-slot]:has(a[href="${sessionHref(a.id)}"])`).boundingBox()
+    const to = await destination.getByRole("button", { name: "Work", exact: true }).boundingBox()
+
+    if (!from || !to) throw new Error("Project folder drag endpoints are missing")
+    await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2)
+    await page.mouse.down()
+    await page.mouse.move(to.x + to.width / 2, to.y + to.height / 2, { steps: 10 })
+  }
+
+  return { ...workspace, otherDirectory, posted, original, other, source, destination, history, hoverDestination }
+}
+
+test("cross-project folder drops preview the destination and preserve session ID, history, and directory across reload", async ({ page }) => {
+  const release = Promise.withResolvers<void>()
+  const moves: { sessionID: string; directory: string; delivery?: string }[] = []
+
+  const move = await crossProjectSessionMove(page, {
+    onSessionMove: async (input) => {
+      moves.push(input)
+      await release.promise
+    },
+  })
+
+  await move.hoverDestination()
+  await expect(page.getByRole("status").filter({ hasText: "OtherScope › Work" })).toContainText("Move to OtherScope › Work")
+  await expect(page.getByRole("status").filter({ hasText: "OtherScope › Work" })).toContainText(`Working directory will change to ${move.otherDirectory}`)
+  expect(move.posted).toEqual([])
+  expect(moves).toEqual([])
+  await expect(move.source).toContainText(a.title)
+  await page.mouse.up()
+  await expect.poll(() => moves).toEqual([{ sessionID: a.id, directory: move.otherDirectory, delivery: "queue" }])
+  expect(move.posted).toEqual([{ directory: move.otherDirectory, delivery: "queue" }])
+  await expect(move.source.locator("[data-titlebar-tab-title]")).toHaveText([a.title])
+  await expect(move.destination.locator("[data-titlebar-tab-slot]")).toHaveCount(0)
+  await expect(page.getByRole("status").filter({ hasText: "OtherScope › Work" })).toContainText("Moving to OtherScope › Work")
+  release.resolve()
+  const link = move.destination.locator(`[data-titlebar-tab-link][href="${sessionHref(a.id)}"]`)
+  await expect(link).toBeVisible()
+  await expect(move.source.locator("[data-titlebar-tab-slot]")).toHaveCount(0)
+  expect(move.sessions.find((item) => item.id === a.id)).toMatchObject({
+    id: a.id,
+    directory: move.otherDirectory,
+    projectID: "proj_otherscope",
+    location: { directory: move.otherDirectory },
+  })
+  await expectPath(page, sessionHref(a.id))
+  await expect(move.history).toContainText("History before moving")
+  await page.reload()
+  await expect(link).toBeVisible()
+  await expect(move.source.locator("[data-titlebar-tab-slot]")).toHaveCount(0)
+  await expect(move.history).toContainText("History before moving")
+  await expect(page.locator('[data-component="composer-editor"]')).toBeEditable()
+  expect(move.posted).toHaveLength(1)
+})
+
+test("cross-project move admission keeps original membership until the server confirms completion", async ({ page }) => {
+  const move = await crossProjectSessionMove(page, {
+    onSessionMove: () => ({ status: 204, body: null }),
+  })
+
+  await move.hoverDestination()
+
+  const admitted = page.waitForResponse((response) =>
+    new URL(response.url()).pathname === `/api/session/${a.id}/move` && response.request().method() === "POST",
+  )
+
+  await page.mouse.up()
+  expect((await admitted).status()).toBe(204)
+  await expect(page.getByRole("status").filter({ hasText: "OtherScope › Work" })).toContainText("Moving to OtherScope › Work")
+  await expect(move.source.locator("[data-titlebar-tab-title]")).toHaveText([a.title])
+  await expect(move.destination.locator("[data-titlebar-tab-slot]")).toHaveCount(0)
+  expect(move.sessions.find((item) => item.id === a.id)?.directory).toBe(move.directory)
+  const session = move.sessions.find((item) => item.id === a.id)
+
+  Object.assign(session!, {
+    directory: move.otherDirectory,
+    location: { directory: move.otherDirectory },
+    projectID: "proj_otherscope",
+  })
+  await move.push([{
+    id: "evt_delayed_folder_move",
+    type: "session.moved",
+    created: T0 + 1,
+    durable: { aggregateID: a.id, seq: 1, version: 1 },
+    data: { sessionID: a.id, location: { directory: move.otherDirectory }, projectID: "proj_otherscope" },
+  }])
+  await expect(move.destination.locator(`[data-titlebar-tab-link][href="${sessionHref(a.id)}"]`)).toBeVisible()
+  await expect(move.source.locator("[data-titlebar-tab-slot]")).toHaveCount(0)
+  await expect(move.history).toContainText("History before moving")
+  expect(move.posted).toEqual([{ directory: move.otherDirectory, delivery: "queue" }])
+})
+
+test("cross-project folder drags released outside the sidebar cancel without a move request", async ({ page }) => {
+  const moves: string[] = []
+
+  const move = await crossProjectSessionMove(page, {
+    onSessionMove: (input) => { moves.push(input.sessionID) },
+  })
+
+  await move.hoverDestination()
+  await expect(page.getByRole("status").filter({ hasText: "OtherScope › Work" })).toContainText("Move to OtherScope › Work")
+  expect(move.posted).toEqual([])
+  await page.mouse.move(1100, 500, { steps: 10 })
+  await page.mouse.up()
+  await expect(page.getByRole("status").filter({ hasText: "OtherScope › Work" })).toBeHidden()
+  await expect(move.source.locator("[data-titlebar-tab-title]")).toHaveText([a.title])
+  await expect(move.destination.locator("[data-titlebar-tab-slot]")).toHaveCount(0)
+  expect(move.posted).toEqual([])
+  expect(moves).toEqual([])
+  expect(move.sessions.find((item) => item.id === a.id)?.directory).toBe(move.directory)
+})
+
+test("busy sessions explain blocked cross-project folder drops and never send a move request", async ({ page }) => {
+  const moves: string[] = []
+
+  const move = await crossProjectSessionMove(page, {
+    sessionStatus: { [a.id]: { type: "running" } },
+    onSessionMove: (input) => { moves.push(input.sessionID) },
+  })
+
+  await expect(move.source.locator('[data-component="activity-ring"]')).toBeVisible()
+  await move.hoverDestination()
+  await expect(page.getByRole("status").filter({ hasText: "OtherScope › Work" })).toContainText("Cannot move to OtherScope › Work")
+  await expect(page.getByRole("status").filter({ hasText: "OtherScope › Work" })).toContainText("Finish running or queued work before moving this session to another project.")
+  expect(move.posted).toEqual([])
+  await page.mouse.up()
+  await expect(page.getByText("Failed to move session", { exact: true })).toBeVisible()
+  await expect(move.source.locator("[data-titlebar-tab-title]")).toHaveText([a.title])
+  await expect(move.destination.locator("[data-titlebar-tab-slot]")).toHaveCount(0)
+  expect(moves).toEqual([])
+  expect(move.posted).toEqual([])
+  expect(move.sessions.find((item) => item.id === a.id)?.directory).toBe(move.directory)
+})
+
+test("failed cross-project folder moves retain original membership and working directory across reload", async ({ page }) => {
+  const moves: { sessionID: string; directory: string; delivery?: string }[] = []
+
+  const move = await crossProjectSessionMove(page, {
+    onSessionMove: (input) => {
+      moves.push(input)
+
+      return { status: 500, body: { message: "Move refused by fixture" } }
+    },
+  })
+
+  await move.hoverDestination()
+  await expect(page.getByRole("status").filter({ hasText: "OtherScope › Work" })).toContainText("Move to OtherScope › Work")
+  expect(move.posted).toEqual([])
+  await page.mouse.up()
+  await expect(page.getByText("Failed to move session", { exact: true })).toBeVisible()
+  expect(moves).toEqual([{ sessionID: a.id, directory: move.otherDirectory, delivery: "queue" }])
+  expect(move.posted).toEqual([{ directory: move.otherDirectory, delivery: "queue" }])
+  await expect(move.source.locator("[data-titlebar-tab-title]")).toHaveText([a.title])
+  await expect(move.destination.locator("[data-titlebar-tab-slot]")).toHaveCount(0)
+  expect(move.sessions.find((item) => item.id === a.id)?.directory).toBe(move.directory)
+  await expect(move.history).toContainText("History before moving")
+  await page.reload()
+  await expect(move.source.locator("[data-titlebar-tab-title]")).toHaveText([a.title])
+  await expect(move.destination.locator("[data-titlebar-tab-slot]")).toHaveCount(0)
+  await expect(move.history).toContainText("History before moving")
+  expect(move.posted).toHaveLength(1)
+})
+
+test("long sidebar lists collapse independently, survive reload, and keep shortcuts on visible sessions", async ({ page }) => {
+  const directory = "C:/OpenCode/CollapsibleLists"
+  const otherDirectory = "C:/OpenCode/OtherList"
+  const other = { id: "ses_other_list", title: "Other list session", directory: otherDirectory, projectID: "proj_otherlist" }
+  await openSession(page, {
+    name: "CollapsibleLists",
+    projects: [
+      project({ id: "proj_collapsiblelists", directory, name: "CollapsibleLists" }),
+      project({ id: "proj_otherlist", directory: otherDirectory, name: "OtherList" }),
+    ],
+    sessions: [a, b, c, ...Array.from({ length: 20 }, (_, i) => ({ id: `ses_long_list_${i}`, title: `Long list ${i}` })), other],
+    seed: {
+      settings: { appearance: { tabLayout: "vertical" } },
+      storage: {
+        "opencode.global.dat:session-pins.v1": { sessions: { local: { [c.id]: { pinned: true, updated: T0, writer: "seed" } } } },
+        "opencode.global.dat:session-folders.v1": {
+          folders: { local: { work: { project: directory, name: "Work", collapsed: false, deleted: false, updated: T0, writer: "seed" } } },
+          sessions: { local: { [b.id]: { folder: "work", updated: T0, writer: "seed" } } },
+        },
+      },
+    },
+  })
+  const sidebar = page.locator('[data-slot="vertical-tabs-sidebar"]')
+  const main = sidebar.getByRole("region", { name: "CollapsibleLists", exact: true })
+  const pinned = sidebar.getByRole("group", { name: "Pinned", exact: true })
+  const unfiled = main.getByRole("group", { name: "Without folder", exact: true })
+  const work = main.getByRole("group", { name: "Work", exact: true })
+  const row = (id: string) => sidebar.locator(`[data-titlebar-tab-slot]:has(a[href="${sessionHref(id)}"])`)
+  await expect(unfiled.locator("[data-titlebar-tab-slot]")).toHaveCount(21)
+  await unfiled.getByRole("button", { name: "Without folder", exact: true }).click()
+  await expect(row(a.id)).toBeHidden()
+  await expect(work.locator("[data-titlebar-tab-slot]")).toBeVisible()
+  await expect(pinned.locator("[data-titlebar-tab-slot]")).toBeVisible()
+  await main.getByRole("button", { name: "CollapsibleLists", exact: true }).click()
+  await expect(work).toBeHidden()
+  await expect(row(other.id)).toBeVisible()
+  await pinned.getByRole("button", { name: "Pinned", exact: true }).click()
+  await expect(row(c.id)).toBeHidden()
+  const modifier = await page.evaluate(() => /(Mac|iPod|iPhone|iPad)/.test(navigator.platform) ? "Meta" : "Control")
+  await page.keyboard.press(`${modifier}+1`)
+  await expectPath(page, sessionHref(other.id))
+  await expect.poll(() => page.evaluate(() => {
+    const saved = JSON.parse(localStorage.getItem("opencode.window.browser.dat:session-sections.v1") ?? "{}")
+
+    return Object.values(saved.collapsed ?? {}).filter(Boolean).length
+  })).toBe(3)
+  await page.reload()
+  await expect(main.getByRole("button", { name: "CollapsibleLists", exact: true })).toHaveAttribute("aria-expanded", "false")
+  await expect(pinned.getByRole("button", { name: "Pinned", exact: true })).toHaveAttribute("aria-expanded", "false")
+  await expect(row(other.id)).toBeVisible()
+  await main.getByRole("button", { name: "CollapsibleLists", exact: true }).click()
+  await expect(unfiled.getByRole("button", { name: "Without folder", exact: true })).toHaveAttribute("aria-expanded", "false")
+  await expect(row(a.id)).toBeHidden()
+  await expect(work.locator("[data-titlebar-tab-slot]")).toBeVisible()
+  await unfiled.getByRole("button", { name: "Without folder", exact: true }).click()
+  await expect(row(a.id)).toBeVisible()
+  await pinned.getByRole("button", { name: "Pinned", exact: true }).click()
+  await expect(row(c.id)).toBeVisible()
+})
+
 test("sessions have geometric avatars that stay stable across rename, Home, and reload", async ({ page }) => {
   await openSession(page, {
     name: "GeometricSessions",
@@ -1755,4 +2193,144 @@ test("sessions have geometric avatars that stay stable across rename, Home, and 
   expect(await fingerprint(a.id)).toBe(marks[0])
   await expect(homeAvatar).toBeVisible()
   expect(await homeAvatar.evaluate((element) => element.outerHTML)).toBe(marks[0])
+})
+
+test("removing a sidebar project keeps its sessions and folders, survives reload, and restores through Undo or Add project", async ({ page }) => {
+  const directory = "C:/OpenCode/RemovableProject"
+  const otherDirectory = "C:/OpenCode/RetainedProject"
+  const deletions: string[] = []
+  page.on("request", (request) => {
+    if (request.method() === "DELETE") deletions.push(new URL(request.url()).pathname)
+  })
+
+  const workspace = await openSession(page, {
+    name: "RemovableProject",
+    projects: [
+      project({ id: "proj_removableproject", directory, name: "RemovableProject" }),
+      project({ id: "proj_retainedproject", directory: otherDirectory, name: "RetainedProject" }),
+    ],
+    sessions: [a, { ...b, directory: otherDirectory, projectID: "proj_retainedproject" }],
+    pageMessages: pageMessagesFrom({
+      [a.id]: [{ id: "msg_hidden_project", type: "user", text: "History stays after removing the project", time: { created: T0 } }],
+    }),
+    seed: {
+      usedProjects: { local: ["proj_removableproject", "proj_retainedproject"] },
+      settings: { appearance: { tabLayout: "vertical" } },
+      storage: {
+        "opencode.global.dat:session-folders.v1": {
+          folders: { local: { work: { project: directory, name: "Work", collapsed: false, deleted: false, updated: T0, writer: "seed" } } },
+          sessions: { local: { [a.id]: { folder: "work", updated: T0, writer: "seed" } } },
+        },
+      },
+    },
+  })
+
+  const sidebar = page.locator('[data-slot="vertical-tabs-sidebar"]')
+  const removed = sidebar.getByRole("region", { name: "RemovableProject", exact: true })
+  const retained = sidebar.getByRole("region", { name: "RetainedProject", exact: true })
+  const work = removed.getByRole("group", { name: "Work", exact: true })
+  const history = page.locator('[data-timeline-row="UserMessage"][data-message-id="msg_hidden_project"]')
+  const description = "Sessions and files are kept. Add the project again to restore it."
+
+  const remove = async () => {
+    const action = removed.getByRole("button", { name: "Remove project RemovableProject", exact: true })
+
+    await expect(action).toHaveAttribute("title", description)
+    await action.click()
+    await expect(removed).toHaveCount(0)
+    await expect(retained.locator("[data-titlebar-tab-title]")).toHaveText([b.title])
+    await expect(history).toContainText("History stays after removing the project")
+    await expect(page.locator('[data-component="composer-editor"]')).toBeEditable()
+    await expectPath(page, sessionHref(a.id))
+  }
+
+  await expect(work.locator("[data-titlebar-tab-title]")).toHaveText([a.title])
+  await remove()
+  await expect(page.getByText("Project removed", { exact: true })).toBeVisible()
+  await expect(page.getByText(description, { exact: true })).toBeVisible()
+  await page.getByRole("button", { name: "Undo", exact: true }).click()
+  await expect(work.locator("[data-titlebar-tab-title]")).toHaveText([a.title])
+  await remove()
+  await page.reload()
+  await expect(history).toContainText("History stays after removing the project")
+  await expect(removed).toHaveCount(0)
+  await expect(retained.locator("[data-titlebar-tab-title]")).toHaveText([b.title])
+  expect(workspace.sessions).toHaveLength(2)
+  expect(workspace.sessions.find((item) => item.id === a.id)).toMatchObject({ id: a.id, directory, title: a.title })
+  await page.goto("/settings")
+  const settings = page.getByTestId("settings-screen")
+
+  await settings.getByRole("tab", { name: "Projects", exact: true }).click()
+  const panel = settings.getByRole("tabpanel")
+
+  await panel.getByRole("button", { name: "Other projects", exact: true }).click()
+  const card = panel.getByRole("listitem").filter({ hasText: "RemovableProject" })
+
+  await card.getByRole("button", { name: "More options", exact: true }).click()
+  await page.getByRole("menuitem", { name: "Add project", exact: true }).click()
+  await page.goto(sessionHref(a.id))
+  await expect(work.locator("[data-titlebar-tab-title]")).toHaveText([a.title])
+  await expect(retained.locator("[data-titlebar-tab-title]")).toHaveText([b.title])
+  await expect(history).toContainText("History stays after removing the project")
+  await page.reload()
+  await expect(work.locator("[data-titlebar-tab-title]")).toHaveText([a.title])
+  await expect(history).toContainText("History stays after removing the project")
+  expect(deletions).toEqual([])
+})
+
+async function hideCurrentDraftProject(page: Page) {
+  const directory = "C:/OpenCode/HiddenDraftProject"
+  const otherDirectory = "C:/OpenCode/VisibleDraftProject"
+  await openSession(page, {
+    name: "HiddenDraftProject",
+    projects: [
+      project({ id: "proj_hiddendraftproject", directory, name: "HiddenDraftProject" }),
+      project({ id: "proj_visibledraftproject", directory: otherDirectory, name: "VisibleDraftProject" }),
+    ],
+    sessions: [a, { ...b, directory: otherDirectory, projectID: "proj_visibledraftproject" }],
+    seed: {
+      settings: { appearance: { tabLayout: "vertical" } },
+      storage: {
+        "opencode.global.dat:server": {
+          lastProjectID: { local: "proj_hiddendraftproject" },
+          usedProjectIDs: { local: ["proj_hiddendraftproject", "proj_visibledraftproject"] },
+        },
+      },
+    },
+  })
+  const sidebar = page.locator('[data-slot="vertical-tabs-sidebar"]')
+  const removed = sidebar.getByRole("region", { name: "HiddenDraftProject", exact: true })
+  const retained = sidebar.getByRole("region", { name: "VisibleDraftProject", exact: true })
+
+  await removed.getByRole("button", { name: "Remove project HiddenDraftProject", exact: true }).click()
+  await expect(removed).toHaveCount(0)
+  await expect(retained.locator("[data-titlebar-tab-title]")).toHaveText([b.title])
+  await expectPath(page, sessionHref(a.id))
+
+  return { directory, otherDirectory, removed, retained }
+}
+
+test("creating a new session from a removed project's current session explicitly restores that project", async ({ page }) => {
+  const { directory, removed, retained } = await hideCurrentDraftProject(page)
+
+  await page.locator('[data-slot="vertical-tabs-sidebar"]').getByRole("button", { name: "New session", exact: true }).click()
+  await expect(page).toHaveURL(/new-session\?draftId=/)
+  await expect(removed).toBeVisible()
+  await expect(removed.locator("[data-titlebar-tab-slot]")).toHaveCount(2)
+  await expect(retained.locator("[data-titlebar-tab-title]")).toHaveText([b.title])
+  await expect(page.locator('[data-component="new-session"]').getByText(directory, { exact: true })).toBeVisible()
+  await expect(page.locator('[data-component="composer-editor"]')).toBeEditable()
+})
+
+test("creating a new session from Home skips the removed last project and uses a visible project", async ({ page }) => {
+  const { otherDirectory, removed, retained } = await hideCurrentDraftProject(page)
+
+  await page.getByRole("button", { name: "Home", exact: true }).click()
+  await expectPath(page, "/")
+  await page.locator('[data-slot="vertical-tabs-sidebar"]').getByRole("button", { name: "New session", exact: true }).click()
+  await expect(page).toHaveURL(/new-session\?draftId=/)
+  await expect(removed).toHaveCount(0)
+  await expect(retained.locator("[data-titlebar-tab-slot]")).toHaveCount(2)
+  await expect(page.locator('[data-component="new-session"]').getByText(otherDirectory, { exact: true })).toBeVisible()
+  await expect(page.locator('[data-component="composer-editor"]')).toBeEditable()
 })
