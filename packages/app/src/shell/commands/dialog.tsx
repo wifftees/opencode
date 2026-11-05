@@ -204,8 +204,7 @@ function PaletteSessionRow(props: {
           </Show>
           {/* A busy session shows its activity ring instead of the unread dot, as session tabs do. */}
           <SessionTabAvatarView
-            project={props.item.project}
-            directory={props.directory}
+            sessionID={props.sessionID}
             unread={status.unread() && !status.loading()}
           />
         </div>
@@ -226,7 +225,7 @@ function PaletteSessionRow(props: {
           </Show>
         </div>
       </div>
-      {/* The project avatar stays put; a working session shows its activity ring where its age would be. */}
+      {/* The session avatar stays put; a working session shows its activity ring where its age would be. */}
       <Show
         when={status.loading()}
         fallback={

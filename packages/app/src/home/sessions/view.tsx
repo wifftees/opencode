@@ -269,8 +269,7 @@ function HomeSessionLeading(props: { record: HomeSessionRecord; open: boolean; u
         />
       </Show>
       <SessionTabAvatarView
-        project={props.record.project}
-        directory={props.record.session.location.directory}
+        sessionID={props.record.session.id}
         unread={props.unread}
       />
     </div>

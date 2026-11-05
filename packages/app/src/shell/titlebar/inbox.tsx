@@ -301,8 +301,7 @@ function InboxRow(props: {
         <span class="flex h-4 w-full min-w-0 items-center gap-1.5 text-[12px] leading-4 text-v2-text-text-faint">
           <span class="flex size-4 shrink-0 items-center justify-center">
             <SessionTabAvatarView
-              project={project()}
-              directory={props.entry.session.location.directory}
+              sessionID={props.entry.session.id}
               unread={false}
             />
           </span>

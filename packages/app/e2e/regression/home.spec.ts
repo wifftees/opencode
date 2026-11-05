@@ -63,7 +63,7 @@ test("Home keeps the session list in every interface mode", async ({ page }) => 
   }
 })
 
-test("a working Home session keeps its project avatar and shows its activity ring at the end of the row", async ({
+test("a working Home session keeps its geometric avatar and shows its activity ring at the end of the row", async ({
   page,
 }) => {
   const working = { id: "ses_home_working", title: "Working session" }
@@ -76,7 +76,7 @@ test("a working Home session keeps its project avatar and shows its activity rin
   await page.goto("/")
   const ring = row(page, working.title).locator('[data-component="activity-ring"]')
   await expect(ring).toBeVisible()
-  await expect(row(page, working.title).locator('[data-component="project-avatar-v2"]')).toBeVisible()
+  await expect(row(page, working.title).locator('[data-component="session-avatar"]')).toBeVisible()
   await expect(row(page, idle.title).locator('[data-component="activity-ring"]')).toHaveCount(0)
 
   // The ring trails the title rather than standing in for the avatar.

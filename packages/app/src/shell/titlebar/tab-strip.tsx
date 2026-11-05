@@ -86,6 +86,7 @@ function SessionTabSlot(props: {
         }}
         href={tabHref(props.tab)}
         server={props.tab.server}
+        sessionID={props.tab.sessionId}
         session={props.session}
         pinned={props.pinned}
         closable={props.closable}

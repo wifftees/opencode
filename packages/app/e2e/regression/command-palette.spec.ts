@@ -131,7 +131,7 @@ test("titlebar search lists recent sessions and opens the typed match", async ({
   await expect(page.getByRole("heading", { name: paletteSession.title, exact: true })).toBeVisible()
 })
 
-test("a working session keeps its project avatar in Search sessions and shows its activity ring in place of its age", async ({
+test("a working session keeps its geometric avatar in Search sessions and shows its activity ring in place of its age", async ({
   page,
 }) => {
   const working = { id: "ses_palette_working", title: "Working session" }
@@ -147,10 +147,10 @@ test("a working session keeps its project avatar in Search sessions and shows it
   const workingRow = dialog.getByRole("option", { name: /Working session/ })
   const idleRow = dialog.getByRole("option", { name: /Idle session/ })
   await expect(workingRow.locator('[data-component="activity-ring"]')).toBeVisible()
-  await expect(workingRow.locator('[data-component="project-avatar-v2"]')).toBeVisible()
+  await expect(workingRow.locator('[data-component="session-avatar"]')).toBeVisible()
   await expect(workingRow.locator(".command-palette-meta")).toHaveText("Working")
   await expect(idleRow.locator('[data-component="activity-ring"]')).toHaveCount(0)
-  await expect(idleRow.locator('[data-component="project-avatar-v2"]')).toBeVisible()
+  await expect(idleRow.locator('[data-component="session-avatar"]')).toBeVisible()
   await expect(idleRow.locator(".command-palette-meta")).not.toHaveText("Working")
 })
 

@@ -25,6 +25,7 @@ export function TabNavItem(props: {
   ref?: Ref<HTMLDivElement>
   href: string
   server: ServerConnection.Key
+  sessionID: string
   session: SessionInfo | undefined
   pinned?: boolean
   closable?: boolean
@@ -310,14 +311,7 @@ export function TabNavItem(props: {
         class="flex h-full min-w-0 flex-1 flex-row items-center gap-1.5 text-[13px] font-medium text-v2-text-text-faint group-data-[active='true']:text-v2-text-text-base group-data-[editing='true']:text-v2-text-text-base [-webkit-user-drag:none]"
       >
         <span data-slot="project-avatar-slot" class="flex size-4 shrink-0 items-center justify-center">
-          <Show
-            when={props.session?.location.directory ?? props.fallbackDirectory}
-            fallback={
-              <span class="block size-4 rounded-[3px] border border-v2-border-border-muted" aria-hidden="true" />
-            }
-          >
-            {(directory) => <SessionTabAvatarView project={project()} directory={directory()} unread={false} />}
-          </Show>
+          <SessionTabAvatarView sessionID={props.sessionID} unread={false} />
           <Show when={dotted()}>
             <span data-slot="tab-avatar-unread-dot" aria-hidden="true" />
           </Show>

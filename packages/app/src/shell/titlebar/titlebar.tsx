@@ -585,22 +585,12 @@ export function Titlebar(props: { verticalTabs?: { mount?: HTMLElement } }) {
 
             const [mobileTabs, setMobileTabs] = createStore({ open: false, settings: false })
 
-            // The current tab's project avatar stays put; while it works, its activity ring shows beside the tab count.
+            // The current tab's avatar stays put; while it works, its activity ring shows beside the tab count.
             const currentStatus = useSessionTabAvatarState(
               () => currentTab()?.server,
               () => session()?.id ?? "",
               () => true,
             )
-
-            const currentProject = createMemo(() => {
-              const tab = currentTab()
-              const value = session()
-
-              if (!tab || !value) return
-              const conn = global.servers.list().find((item) => ServerConnection.key(item) === tab.server)
-
-              return conn ? global.ensureServerCtx(conn).projects.forSession(value) : undefined
-            })
 
             const currentTitle = () => {
               const tab = currentTab()
@@ -684,8 +674,7 @@ export function Titlebar(props: { verticalTabs?: { mount?: HTMLElement } }) {
                               >
                                 {(value) => (
                                   <SessionTabAvatarView
-                                    project={currentProject()}
-                                    directory={value().location.directory}
+                                    sessionID={value().id}
                                     unread={currentStatus.unread() && !currentStatus.loading()}
                                   />
                                 )}

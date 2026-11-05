@@ -218,24 +218,12 @@ function RecentlyClosedTabItem(props: { entry: Pick<ClosedTab, "tab" | "info">; 
   )
 
   const session = createMemo(() => serverCtx()?.data.session.get(props.entry.tab.sessionId))
-  const directory = () => props.entry.info?.directory ?? session()?.location.directory ?? ""
-
-  const project = createMemo(() => {
-    const value = session()
-
-    if (value) return serverCtx()?.projects.forSession(value)
-
-    if (!directory()) return
-
-    return serverCtx()?.projects.forDirectory(directory()) ?? { worktree: directory() }
-  })
-
   const title = () => sessionTabTitle(session()?.title ?? props.entry.info?.title, language.t("session.tab.session"))
 
   return (
     <Menu.Item class="max-w-56" onSelect={props.onSelect}>
       <span class="flex size-4 shrink-0 items-center justify-center">
-        <SessionTabAvatarView project={project()} directory={directory()} unread={false} />
+        <SessionTabAvatarView sessionID={props.entry.tab.sessionId} unread={false} />
       </span>
       <Tooltip
         placement={placement}
