@@ -1785,9 +1785,12 @@ test("project session folders support validation, drag, collapse, rename, and sa
   }
 
   await move(b.id, "Work")
+  await expect(row(b.id).getByRole("img", { name: "Pinned", exact: true })).toHaveCount(0)
+  await row(b.id).click({ button: "right" })
+  await expect(page.getByRole("menuitem", { name: "Pin session", exact: true })).toBeVisible()
+  await page.keyboard.press("Escape")
   await move(b.id, "Later")
   const pinned = sidebar.getByRole("group", { name: "Pinned", exact: true })
-  // An unfiled pinned session returns to Pinned and must not also appear under Without folder.
   const source = await row(b.id).boundingBox()
   const target = await folder("Without folder").getByRole("button", { name: "Without folder", exact: true }).boundingBox()
 
@@ -1796,11 +1799,10 @@ test("project session folders support validation, drag, collapse, rename, and sa
   await page.mouse.down()
   await page.mouse.move(target.x + target.width / 2, target.y + target.height / 2, { steps: 10 })
   await page.mouse.up()
-  await expect(pinned.locator("[data-titlebar-tab-title]")).toHaveText([b.title])
+  await expect(pinned.locator("[data-titlebar-tab-title]")).toHaveCount(0)
+  await expect(folder("Without folder").locator("[data-titlebar-tab-title]")).toHaveText([a.title, b.title])
   await expect(row(b.id)).toHaveCount(1)
   await move(b.id, "Work")
-  await row(b.id).click({ button: "right" })
-  await page.getByRole("menuitem", { name: "Unpin session", exact: true }).click()
   await folder("Work").getByRole("button", { name: "Work", exact: true }).click()
   await expect(folder("Work").getByRole("button", { name: "Work", exact: true })).toHaveAttribute(
     "aria-expanded",
@@ -1917,6 +1919,7 @@ async function crossProjectSessionMove(
     seed: {
       settings: { appearance: { tabLayout: "vertical" } },
       storage: {
+        "opencode.global.dat:session-pins.v1": { sessions: { local: { [a.id]: { pinned: true, updated: T0, writer: "seed" } } } },
         "opencode.global.dat:session-folders.v1": {
           folders: { local: {
             source: { project: directory, name: "Source", collapsed: false, deleted: false, updated: T0, writer: "seed" },
@@ -1970,11 +1973,13 @@ test("cross-project folder drops preview the destination and preserve session ID
   await expect.poll(() => moves).toEqual([{ sessionID: a.id, directory: move.otherDirectory, delivery: "queue" }])
   expect(move.posted).toEqual([{ directory: move.otherDirectory, delivery: "queue" }])
   await expect(move.source.locator("[data-titlebar-tab-title]")).toHaveText([a.title])
+  await expect(move.source.getByRole("img", { name: "Pinned", exact: true })).toBeVisible()
   await expect(move.destination.locator("[data-titlebar-tab-slot]")).toHaveCount(0)
   await expect(page.getByRole("status").filter({ hasText: "OtherScope › Work" })).toContainText("Moving to OtherScope › Work")
   release.resolve()
   const link = move.destination.locator(`[data-titlebar-tab-link][href="${sessionHref(a.id)}"]`)
   await expect(link).toBeVisible()
+  await expect(move.destination.getByRole("img", { name: "Pinned", exact: true })).toHaveCount(0)
   await expect(move.source.locator("[data-titlebar-tab-slot]")).toHaveCount(0)
   expect(move.sessions.find((item) => item.id === a.id)).toMatchObject({
     id: a.id,
@@ -1986,6 +1991,7 @@ test("cross-project folder drops preview the destination and preserve session ID
   await expect(move.history).toContainText("History before moving")
   await page.reload()
   await expect(link).toBeVisible()
+  await expect(move.destination.getByRole("img", { name: "Pinned", exact: true })).toHaveCount(0)
   await expect(move.source.locator("[data-titlebar-tab-slot]")).toHaveCount(0)
   await expect(move.history).toContainText("History before moving")
   await expect(page.locator('[data-component="composer-editor"]')).toBeEditable()
@@ -2090,6 +2096,7 @@ test("failed cross-project folder moves retain original membership and working d
   expect(moves).toEqual([{ sessionID: a.id, directory: move.otherDirectory, delivery: "queue" }])
   expect(move.posted).toEqual([{ directory: move.otherDirectory, delivery: "queue" }])
   await expect(move.source.locator("[data-titlebar-tab-title]")).toHaveText([a.title])
+  await expect(move.source.getByRole("img", { name: "Pinned", exact: true })).toBeVisible()
   await expect(move.destination.locator("[data-titlebar-tab-slot]")).toHaveCount(0)
   expect(move.sessions.find((item) => item.id === a.id)?.directory).toBe(move.directory)
   await expect(move.history).toContainText("History before moving")
@@ -2333,4 +2340,26 @@ test("creating a new session from Home skips the removed last project and uses a
   await expect(retained.locator("[data-titlebar-tab-slot]")).toHaveCount(2)
   await expect(page.locator('[data-component="new-session"]').getByText(otherDirectory, { exact: true })).toBeVisible()
   await expect(page.locator('[data-component="composer-editor"]')).toBeEditable()
+})
+
+
+test("dropping a pinned session into its current folder removes its saved pin", async ({ page }) => {
+  const move = await crossProjectSessionMove(page)
+  const row = move.source.locator("[data-titlebar-tab-slot]")
+  await expect(row.getByRole("img", { name: "Pinned", exact: true })).toBeVisible()
+  const from = await row.boundingBox()
+  const to = await move.source.getByRole("button", { name: "Source", exact: true }).boundingBox()
+
+  if (!from || !to) throw new Error("Existing folder drag endpoints are missing")
+  await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(to.x + to.width / 2, to.y + to.height / 2, { steps: 10 })
+  await page.mouse.up()
+  await expect(row.getByRole("img", { name: "Pinned", exact: true })).toHaveCount(0)
+  await row.click({ button: "right" })
+  await expect(page.getByRole("menuitem", { name: "Pin session", exact: true })).toBeVisible()
+  await page.keyboard.press("Escape")
+  await page.reload()
+  await expect(row.getByRole("img", { name: "Pinned", exact: true })).toHaveCount(0)
+  expect(move.posted).toEqual([])
 })

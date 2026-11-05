@@ -861,7 +861,12 @@ export function TitlebarTabStrip(props: {
   const previewFor = (tab: Tab, destination: SessionDropDestination, row = false): SessionDropPreview => {
     const label = destinationLabel(destination)
     const cross = pathKey(projectFor(tab) ?? "") !== pathKey(destination.project)
-    const unchanged = !cross && folderFor(tab)?.id === destination.folderID
+
+    const unchanged =
+      !cross &&
+      folderFor(tab)?.id === destination.folderID &&
+      !(destination.folderID && tab.type === "session" && pins.isPinned(tab.server, tab.sessionId))
+
     const ctx = global.serverCtx(tab.server)
 
     const reason =
@@ -917,10 +922,19 @@ export function TitlebarTabStrip(props: {
     if (folder?.collapsed) folders.collapse(destination.server, folder.id)
   }
 
+  const unpinInFolder = (tab: SessionTab, destination: SessionDropDestination) => {
+    if (
+      destination.folderID &&
+      folders.folder(tab.server, tab.sessionId)?.id === destination.folderID &&
+      pins.isPinned(tab.server, tab.sessionId)
+    )
+      pins.set(tab.server, tab.sessionId, false)
+  }
+
   createEffect(() => {
     for (const [key, destination] of Object.entries(moving)) {
       if (!destination) continue
-      const tab = orderedTabs().find((item) => tabKey(item) === key)
+      const tab = [...props.tabs, ...folderTabs(), ...pinnedTabs()].find((item) => tabKey(item) === key)
 
       if (!tab || tab.type !== "session") continue
       const ctx = global.serverCtx(tab.server)
@@ -934,6 +948,7 @@ export function TitlebarTabStrip(props: {
         destination.project,
         folder?.project === destination.project ? folder.id : undefined,
       )
+      unpinInFolder(tab, destination)
       ctx?.projects.touch(destination.project)
       expandDestination(destination)
       setMoving(key, undefined)
@@ -973,6 +988,7 @@ export function TitlebarTabStrip(props: {
 
     if (!cross) {
       folders.move(tab.server, tab.sessionId, destination.project, destination.folderID)
+      unpinInFolder(tab, destination)
       expandDestination(destination)
 
       return
