@@ -122,6 +122,7 @@ export { DestinationNotFoundError, DestinationNotDirectoryError, DestinationUnav
 export { TurnRangeError }
 
 export interface Interface {
+  readonly search: (input: SessionSchema.SearchInput) => Effect.Effect<SessionSchema.SearchResult[]>
   /** A cursor carries the filters of the request that produced it, so filters passed with a cursor are ignored. */
   readonly list: (input?: ListFilter & { readonly limit?: number; readonly cursor?: ListCursor }) => Effect.Effect<
     {
@@ -400,6 +401,7 @@ const layer = Layer.effect(
         yield* bus.publish(SessionEvent.Deleted, { sessionID })
         yield* bus.remove(sessionID)
       }),
+      search: (input) => store.search(input),
       list: Effect.fn("Session.list")(function* (input = {}) {
         const filter =
           input.cursor === undefined

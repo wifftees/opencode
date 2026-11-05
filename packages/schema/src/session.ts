@@ -6,7 +6,7 @@ import { Agent } from "./agent.js"
 import { Location } from "./location.js"
 import { Model } from "./model.js"
 import { Project } from "./project.js"
-import { AbsolutePath, DateTimeUtcFromMillis, optional, RelativePath, statics } from "./schema.js"
+import { AbsolutePath, DateTimeUtcFromMillis, optional, PositiveInt, RelativePath, statics } from "./schema.js"
 import { SessionEvent } from "./session-event.js"
 import { SessionID } from "./session-id.js"
 import { SessionMetadata } from "./session-metadata.js"
@@ -61,6 +61,22 @@ export const Info = Schema.Struct({
   permissions: Permission.Ruleset.pipe(optional),
   revert: Revert.pipe(optional),
 }).annotate({ identifier: "Session.Info" })
+
+export interface SearchInput extends Schema.Schema.Type<typeof SearchInput> {}
+export const SearchInput = Schema.Struct({
+  query: Schema.String,
+  limit: PositiveInt.pipe(optional),
+  archived: Schema.Boolean.pipe(optional),
+}).annotate({ identifier: "Session.SearchInput" })
+
+export interface SearchResult extends Schema.Schema.Type<typeof SearchResult> {}
+export const SearchResult = Schema.Struct({
+  session: Info,
+  matchKind: Schema.Literals(["title", "content"]),
+  score: Schema.Finite,
+  snippet: Schema.String.pipe(optional),
+  messageID: Schema.String.pipe(optional),
+}).annotate({ identifier: "Session.SearchResult" })
 
 export const ListAnchor = Schema.Struct({
   id: ID,

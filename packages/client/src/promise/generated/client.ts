@@ -20,6 +20,8 @@ import type {
   PluginUpdateOutput,
   SessionListInput,
   SessionListOutput,
+  SessionSearchInput,
+  SessionSearchOutput,
   SessionCreateInput,
   SessionCreateOutput,
   SessionActiveOutput,
@@ -620,6 +622,18 @@ export function make(options: ClientOptions) {
           },
           requestOptions,
         ),
+      search: (input: SessionSearchInput, requestOptions?: RequestOptions) =>
+        request<{ readonly data: SessionSearchOutput }>(
+          {
+            method: "GET",
+            path: `/api/session/search`,
+            query: { query: input["query"], limit: input["limit"], archived: input["archived"] },
+            successStatus: 200,
+            declaredStatuses: [400, 401],
+            empty: false,
+          },
+          requestOptions,
+        ).then((value) => value.data),
       create: (input?: SessionCreateInput, requestOptions?: RequestOptions) =>
         request<{ readonly data: SessionCreateOutput }>(
           {

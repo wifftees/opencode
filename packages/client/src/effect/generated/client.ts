@@ -26,6 +26,8 @@ import type {
   PluginUpdateOutput,
   SessionListInput,
   SessionListOutput,
+  SessionSearchInput,
+  SessionSearchOutput,
   SessionCreateInput,
   SessionCreateOutput,
   SessionActiveOutput,
@@ -442,6 +444,16 @@ const EndpointSessionList = (raw: RawClient["server.session"]) => (input?: Sessi
     }).pipe(Effect.mapError(mapClientError)),
   )
 
+const EndpointSessionSearch = (raw: RawClient["server.session"]) => (input: SessionSearchInput) =>
+  preserveEffect<SessionSearchOutput>()(
+    raw["session.search"]({
+      query: { query: input["query"], limit: input["limit"], archived: input["archived"] },
+    }).pipe(
+      Effect.mapError(mapClientError),
+      Effect.map((value) => value.data),
+    ),
+  )
+
 const EndpointSessionCreate = (raw: RawClient["server.session"]) => (input?: SessionCreateInput) =>
   preserveEffect<SessionCreateOutput>()(
     raw["session.create"]({
@@ -748,6 +760,7 @@ const EndpointSessionView = (raw: RawClient["server.session"]) => (input: Sessio
 
 const adaptGroupSession = (raw: RawClient["server.session"]) => ({
   list: EndpointSessionList(raw),
+  search: EndpointSessionSearch(raw),
   create: EndpointSessionCreate(raw),
   active: EndpointSessionActive(raw),
   get: EndpointSessionGet(raw),

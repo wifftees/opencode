@@ -64,3 +64,46 @@ it.live("archives and unarchives a session through PATCH", () =>
     expect(yield* listed(false)).toContain(created.data.id)
   }).pipe(Effect.scoped),
 )
+
+it.live("searches session titles through the capped root-only text-search endpoint", () =>
+  Effect.gen(function* () {
+    const request = yield* makeRequest()
+    const created = Schema.decodeUnknownSync(SessionResponse)(
+      yield* request("/api/session", "POST", { title: "Поиск Docker PostgreSQL" }),
+    ).data
+    yield* request("/api/session", "POST", { title: "Docker child", parentID: created.id })
+    const archived = Schema.decodeUnknownSync(SessionResponse)(
+      yield* request("/api/session", "POST", { title: "Docker archived" }),
+    ).data
+    yield* request(`/api/session/${archived.id}`, "PATCH", { archived: true })
+    const response = Schema.decodeUnknownSync(
+      Schema.Struct({ data: Schema.Array(Schema.toEncoded(Session.SearchResult)) }),
+    )(yield* request(`/api/session/search?query=${encodeURIComponent("ДОКЕР OR")}`, "GET"))
+    expect(response.data).toEqual([])
+    const matches = Schema.decodeUnknownSync(
+      Schema.Struct({ data: Schema.Array(Schema.toEncoded(Session.SearchResult)) }),
+    )(yield* request("/api/session/search?query=DOCKER%20postgre&limit=1", "GET"))
+    expect(matches.data).toHaveLength(1)
+    expect(matches.data[0]).toMatchObject({ session: { id: created.id }, matchKind: "title" })
+    expect(matches.data[0]?.score).toBeGreaterThan(0)
+    const archives = Schema.decodeUnknownSync(
+      Schema.Struct({ data: Schema.Array(Schema.toEncoded(Session.SearchResult)) }),
+    )(yield* request("/api/session/search?query=docker&archived=true", "GET"))
+    expect(archives.data.map((hit) => hit.session.id)).toEqual([archived.id])
+  }).pipe(Effect.scoped),
+)
+
+it.live("rejects an invalid search limit without treating search as a session ID", () =>
+  Effect.gen(function* () {
+    const handler = yield* ServerFetch.make({
+      app: { version: "test" },
+      database: { path: ":memory:" },
+      fs: { filewatcher: false },
+      models: { fetch: false },
+    })
+    const response = yield* Effect.promise(() =>
+      handler(new Request("http://opencode.local/api/session/search?query=word&limit=0")),
+    )
+    expect(response.status).toBe(400)
+  }).pipe(Effect.scoped),
+)

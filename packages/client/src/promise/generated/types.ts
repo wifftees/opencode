@@ -2633,6 +2633,14 @@ export type SessionsResponse = {
   cursor: { previous?: SessionsCursor | null; next?: SessionsCursor | null }
 }
 
+export type SessionSearchResult = {
+  session: SessionInfo
+  matchKind: "title" | "content"
+  score: number
+  snippet?: string
+  messageID?: string
+}
+
 export type SessionInboxInfo = SessionInboxUser | SessionInboxSynthetic | SessionInboxCompaction | SessionInboxMove
 
 export type SessionMessageAssistant = {
@@ -3273,6 +3281,14 @@ export type SessionListInput = {
 }
 
 export type SessionListOutput = SessionsResponse
+
+export type SessionSearchInput = {
+  readonly query: string
+  readonly limit?: number | undefined
+  readonly archived?: boolean | undefined
+}
+
+export type SessionSearchOutput = { data: Array<SessionSearchResult> }["data"]
 
 export type SessionCreateInput = {
   readonly id?: string | null | undefined

@@ -14,6 +14,8 @@ type Transaction = Parameters<Parameters<Database["transaction"]>[0]>[0]
 export type Migration = {
   id: string
   foreignKeys?: boolean
+  /** Creates schema objects that the generated Drizzle bootstrap cannot represent. */
+  bootstrap?: boolean
   up: (tx: Transaction) => Effect.Effect<void, unknown, Global.Service>
 }
 
@@ -34,6 +36,11 @@ export function apply(db: Database) {
     yield* db.transaction((tx) =>
       Effect.gen(function* () {
         yield* schema.up(tx)
+        yield* Effect.forEach(
+          migrations.filter((migration) => migration.bootstrap),
+          (migration) => migration.up(tx),
+          { discard: true },
+        )
         yield* tx.run(
           sql`CREATE TABLE ${sql.identifier("migration")} (id TEXT PRIMARY KEY, time_completed INTEGER NOT NULL)`,
         )

@@ -77,6 +77,7 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
             )
         }),
       )
+      .handle("session.search", ({ query }) => session.search(query).pipe(Effect.map((data) => ({ data }))))
       .handle(
         "session.stats",
         Effect.fn(function* (ctx) {

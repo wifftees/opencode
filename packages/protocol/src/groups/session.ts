@@ -47,6 +47,11 @@ const PublicSessionInfo = Schema.Struct({
   location: Location.PublicRef,
 }).annotate({ identifier: "Session.Info" })
 
+const PublicSessionSearchResult = Schema.Struct({
+  ...Session.SearchResult.fields,
+  session: PublicSessionInfo,
+}).annotate({ identifier: "Session.SearchResult" })
+
 const PublicSessionTransfer = Schema.Struct({
   info: PublicSessionInfo,
   messages: Schema.Array(PublicSessionMessage),
@@ -139,6 +144,22 @@ export const makeSessionGroup = <I extends HttpApiMiddleware.AnyId, S, FormI ext
           summary: "List sessions",
           description:
             "Retrieve sessions in the requested order. Items keep that order across pages; use cursor.next or cursor.previous to move through the ordered list.",
+        }),
+      ),
+    )
+    .add(
+      HttpApiEndpoint.get("session.search", "/api/session/search", {
+        query: Schema.Struct({
+          ...Session.SearchInput.fields,
+          limit: Schema.NumberFromString.pipe(Schema.decodeTo(PositiveInt), Schema.optional),
+        }),
+        success: Schema.Struct({ data: Schema.Array(PublicSessionSearchResult) }),
+      }).annotateMerge(
+        OpenApi.annotations({
+          identifier: "session.search",
+          summary: "Search session titles and messages",
+          description:
+            "Find root sessions by literal words in their titles or user and assistant messages. Title matches rank first.",
         }),
       ),
     )

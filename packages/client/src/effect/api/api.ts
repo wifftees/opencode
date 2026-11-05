@@ -149,6 +149,14 @@ export type SessionListOutput = {
 }
 export type SessionListOperation<E = never> = (input?: SessionListInput) => Effect.Effect<SessionListOutput, E>
 
+export type SessionSearchInput = {
+  readonly query: string
+  readonly limit?: number | undefined
+  readonly archived?: boolean | undefined
+}
+export type SessionSearchOutput = ReadonlyArray<Session.SearchResult>
+export type SessionSearchOperation<E = never> = (input: SessionSearchInput) => Effect.Effect<SessionSearchOutput, E>
+
 export type SessionCreateInput = {
   readonly id?: Session.ID | undefined
   readonly parentID?: Session.ID | undefined
@@ -401,6 +409,7 @@ export type SessionViewOperation<E = never> = (input: SessionViewInput) => Effec
 
 export interface SessionApi<E = never> {
   readonly list: SessionListOperation<E>
+  readonly search: SessionSearchOperation<E>
   readonly create: SessionCreateOperation<E>
   readonly active: SessionActiveOperation<E>
   readonly get: SessionGetOperation<E>
