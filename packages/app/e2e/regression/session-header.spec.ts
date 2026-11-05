@@ -5,6 +5,7 @@ import { fixture, mockStressTimeline } from "../utils/session-fixture"
 import { reviewTabs } from "../utils/side-panel"
 import { expectSessionTitle } from "../utils/waits"
 import { mockRemoteServer, mockWorkspace, openSession } from "../utils/workspace"
+import { confirmSessionTabClose } from "../utils/tab-close"
 
 const tabs = (page: Page) => page.locator('[data-slot="titlebar-tabs"] a')
 
@@ -619,6 +620,7 @@ test.describe("rename", () => {
     const renamed = tabs(page).filter({ hasText: "Renamed from tab" })
     await renamed.click({ button: "right" })
     await page.getByRole("menuitem", { name: "Close tab", exact: true }).click()
+    await confirmSessionTabClose(page)
     await expect(renamed).toBeHidden()
     await page.getByRole("button", { name: "Home", exact: true }).click()
     await expect(

@@ -19,6 +19,7 @@ import { mockServers, type MockServerConfig } from "../utils/mock-server"
 import { fixture, mockStressTimeline } from "../utils/session-fixture"
 import { fileNode, mockWorkspace, openSession, newSessionWorktree } from "../utils/workspace"
 import { expectSessionTitle } from "../utils/waits"
+import { confirmSessionTabClose } from "../utils/tab-close"
 
 const a = { id: "ses_tab_a", title: "Tab A session" }
 
@@ -259,6 +260,7 @@ test("inactive session attention dots share the close control without marking th
   await expect(dot).toBeVisible()
   await tabB.hover()
   await close.click()
+  await confirmSessionTabClose(page)
   await expect(tabB).toHaveCount(0)
   await expectPath(page, sessionHref(a.id))
 })
@@ -410,6 +412,7 @@ test("vertical pinned sessions stay separate from open tabs through close, reope
 
   await tabB.hover()
   await tabB.getByRole("button", { name: "Close tab", exact: true }).click()
+  await confirmSessionTabClose(page)
   await expectPath(page, sessionHref(c.id))
   await expect(pinned.locator("[data-titlebar-tab-title]")).toHaveText([b.title])
   await expect(tabB.getByRole("button", { name: "Close tab", exact: true })).toHaveCount(0)
@@ -935,6 +938,7 @@ test("vertical tab gaps hover and select the nearest row", async ({ page }) => {
   await expect(rows.locator("[data-titlebar-tab-title]")).toHaveText([a.title, c.title, b.title])
 
   await tabB.getByRole("button", { name: "Close tab", exact: true }).click()
+  await confirmSessionTabClose(page)
   await expect(rows.locator("[data-titlebar-tab-title]")).toHaveText([a.title, c.title])
   await expectPath(page, sessionHref(c.id))
 
@@ -1022,6 +1026,7 @@ test("tab preview opens cold, switches immediately between tabs, and closes outs
   await page.clock.runFor(800)
   await expect(preview).toContainText(b.title)
   await tabB.getByRole("button", { name: "Close tab", exact: true }).click()
+  await confirmSessionTabClose(page)
   await page.mouse.move(900, 500)
   await page.clock.runFor(600)
   await tabC.hover()
@@ -1046,6 +1051,7 @@ test("closing the active server's last tab opens the remaining server tab", asyn
     .locator(`[data-titlebar-tab-slot]:has(a[href="${sessionHref(sessionA.id)}"])`)
     .getByRole("button", { name: "Close tab", exact: true })
     .click()
+  await confirmSessionTabClose(page)
 
   await expectPath(page, sessionHref(sessionB.id, REMOTE_SERVER))
   await expectSessionTitle(page, sessionB.title)
@@ -1283,6 +1289,7 @@ test("inactive tabs load attention and inbox, but read the transcript only on se
 
   const child = page.locator(`[data-titlebar-tab-slot]:has(a[href="${sessionHref(fixture.childID)}"])`)
   await child.getByRole("button", { name: "Close tab", exact: true }).click()
+  await confirmSessionTabClose(page)
   await expect(child).toHaveCount(0)
   await expectPath(page, sessionHref(fixture.sourceID))
 
@@ -1488,6 +1495,7 @@ test("⌘W past the side panel's last tab keeps the session tab", async ({ page 
   // From the composer ⌘W closes the session tab, so only a swallowed press above leaves Beta to land on.
   await page.getByRole("textbox", { name: "Prompt", exact: true }).click()
   await page.keyboard.press("ControlOrMeta+w")
+  await confirmSessionTabClose(page)
   await expectPath(page, sessionHref(sessions.beta.id))
   await expect(sessions.alphaTab).toHaveCount(0)
 })
@@ -1497,6 +1505,7 @@ test("⌘W closes the session tab again once the window loses focus after the si
   // ⌘Tab away and back sends no click or key the page sees.
   await page.evaluate(() => window.dispatchEvent(new Event("blur")))
   await page.keyboard.press("ControlOrMeta+w")
+  await confirmSessionTabClose(page)
   await expectPath(page, sessionHref(sessions.beta.id))
   await expect(sessions.alphaTab).toHaveCount(0)
 })
@@ -1534,6 +1543,7 @@ test("⌘W in the side panel closes its last New tab with the panel, and only th
   // With no panel open, ⌘W from the composer closes the session tab.
   await composer.click()
   await page.keyboard.press("ControlOrMeta+w")
+  await confirmSessionTabClose(page)
   await expectPath(page, sessionHref(beta.id))
   await expect(alphaTab).toHaveCount(0)
 })
@@ -1822,6 +1832,7 @@ test("project session folders support validation, drag, collapse, rename, and sa
   await page.getByRole("button", { name: "Save", exact: true }).click()
   await expect(folder("Research").locator("[data-titlebar-tab-title]")).toHaveText([b.title])
   await row(b.id).getByRole("button", { name: "Close tab", exact: true }).click()
+  await confirmSessionTabClose(page)
   await expect(folder("Research").locator("[data-titlebar-tab-title]")).toHaveText([b.title])
   await folder("Research").getByRole("button", { name: "Actions for Research", exact: true }).click()
   await page.getByRole("menuitem", { name: "Delete folder", exact: true }).click()
@@ -2375,4 +2386,155 @@ test("dropping a pinned session into its current folder removes its saved pin", 
   await page.reload()
   await expect(row.getByRole("img", { name: "Pinned", exact: true })).toHaveCount(0)
   expect(move.posted).toEqual([])
+})
+
+test("closing a session tab requires confirmation and Control+Z restores its original position without deletion", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  const directory = "C:/OpenCode/ConfirmedTabClose"
+  const removed: string[] = []
+  page.on("request", (request) => {
+    if (request.method() === "DELETE" && new URL(request.url()).pathname.startsWith("/api/session/"))
+      removed.push(new URL(request.url()).pathname)
+  })
+  await openSession(page, {
+    name: "ConfirmedTabClose",
+    sessions: [a, b, c],
+    fileList: (path) => path ? [] : [fileNode(directory, "README.md")],
+    fileContent: () => ({ type: "text", content: "File content survives closing the tab" }),
+    pageMessages: pageMessagesFrom({
+      [b.id]: [{ id: "msg_close_history", type: "user", text: "History survives closing the tab", time: { created: T0 } }],
+    }),
+    seed: {
+      panes: { [b.id]: { review: true, sessionWidth: 640.5 } },
+      storage: reviewTabs(directory, b.id),
+    },
+  })
+  const rows = page.locator('[data-slot="titlebar-tabs"] [data-titlebar-tab-slot]')
+  const titles = rows.locator("[data-titlebar-tab-title]")
+  const tabB = rows.filter({ has: page.locator(`a[href="${sessionHref(b.id)}"]`) })
+  const dialog = page.getByRole("dialog", { name: "Close session tab", exact: true })
+  const panel = page.locator("#review-panel")
+  const readme = panel.getByRole("tab", { name: "README.md", exact: true })
+
+  await expect(titles).toHaveText([a.title, b.title, c.title])
+  await tabB.locator("[data-titlebar-tab-link]").click()
+  await expectPath(page, sessionHref(b.id))
+  await expect(panel).toBeVisible()
+  await openFileLauncher(panel)
+  await panel.getByRole("treeitem", { name: "README.md", exact: true }).click()
+  await expect(readme).toHaveAttribute("aria-selected", "true")
+  await expect(panel.getByText("File content survives closing the tab", { exact: true })).toBeVisible()
+  const panelWidth = await panel.evaluate((element) => element.getBoundingClientRect().width)
+  await rows.filter({ has: page.locator(`a[href="${sessionHref(a.id)}"]`) }).locator("[data-titlebar-tab-link]").click()
+  await expectPath(page, sessionHref(a.id))
+  await tabB.getByRole("button", { name: "Close tab", exact: true }).click()
+  await expect(dialog).toContainText(b.title)
+  await expect(dialog.getByRole("button", { name: "Cancel", exact: true })).toBeFocused()
+  await page.keyboard.press("Control+z")
+  await expect(dialog).toBeVisible()
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click()
+  await expect(dialog).toBeHidden()
+  await expect(titles).toHaveText([a.title, b.title, c.title])
+  await expectPath(page, sessionHref(a.id))
+  expect(removed).toEqual([])
+
+  await tabB.getByRole("button", { name: "Close tab", exact: true }).click()
+  await confirmSessionTabClose(page)
+  await expect(tabB).toHaveCount(0)
+  await expect(titles).toHaveText([a.title, c.title])
+  await page.keyboard.press("Control+z")
+  await expectPath(page, sessionHref(b.id))
+  await expect(titles).toHaveText([a.title, b.title, c.title])
+  await expect(page.getByText("History survives closing the tab", { exact: true })).toBeVisible()
+  await expect(panel).toBeVisible()
+  await expect(readme).toHaveAttribute("aria-selected", "true")
+  await expect(panel.getByText("File content survives closing the tab", { exact: true })).toBeVisible()
+  await expect.poll(() => panel.evaluate((element) => element.getBoundingClientRect().width)).toBeCloseTo(panelWidth, 1)
+
+  await tabB.click({ button: "middle" })
+  await confirmSessionTabClose(page)
+  await expect(tabB).toHaveCount(0)
+  const modifier = await page.evaluate(() => /Mac|iPhone|iPad/.test(navigator.platform) ? "Meta" : "Control")
+  await page.keyboard.press(`${modifier}+Shift+t`)
+  await expectPath(page, sessionHref(b.id))
+  await expect(titles).toHaveText([a.title, b.title, c.title])
+  expect(removed).toEqual([])
+})
+
+test("Control+Z restores a closed session tab with its folder, pin, and chat history", async ({ page }) => {
+  const directory = "C:/OpenCode/CloseFolderTab"
+  await openSession(page, {
+    name: "CloseFolderTab",
+    sessions: [a, b],
+    sessionID: b.id,
+    pageMessages: pageMessagesFrom({
+      [b.id]: [{ id: "msg_folder_close_history", type: "user", text: "Pinned folder history remains", time: { created: T0 } }],
+    }),
+    seed: {
+      settings: { appearance: { tabLayout: "vertical" } },
+      storage: {
+        "opencode.global.dat:session-pins.v1": { sessions: { local: { [b.id]: { pinned: true, updated: T0, writer: "seed" } } } },
+        "opencode.global.dat:session-folders.v1": {
+          folders: { local: { work: { project: directory, name: "Work", collapsed: false, deleted: false, updated: T0, writer: "seed" } } },
+          sessions: { local: { [b.id]: { folder: "work", updated: T0, writer: "seed" } } },
+        },
+      },
+    },
+  })
+  const work = page.locator('[data-slot="vertical-tabs-sidebar"]').getByRole("group", { name: "Work", exact: true })
+  const row = work.locator(`[data-titlebar-tab-slot]:has(a[href="${sessionHref(b.id)}"])`)
+  const close = row.getByRole("button", { name: "Close tab", exact: true })
+
+  await expect(row.getByRole("img", { name: "Pinned", exact: true })).toBeVisible()
+  await expect(page.getByText("Pinned folder history remains", { exact: true })).toBeVisible()
+  await close.click()
+  await confirmSessionTabClose(page)
+  await expectPath(page, sessionHref(a.id))
+  await expect(close).toHaveCount(0)
+  await page.keyboard.press("Control+z")
+  await expectPath(page, sessionHref(b.id))
+  await expect(close).toBeVisible()
+  await expect(row.getByRole("img", { name: "Pinned", exact: true })).toBeVisible()
+  await expect(page.getByText("Pinned folder history remains", { exact: true })).toBeVisible()
+})
+
+test("closing undo leaves editor undo alone after the user types", async ({ page }) => {
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"])
+  await openSession(page, { name: "CloseEditorUndo", sessions: [a, b] })
+  const tabB = page.locator(`[data-titlebar-tab-slot]:has(a[href="${sessionHref(b.id)}"])`)
+  const editor = page.getByRole("textbox", { name: "Prompt", exact: true })
+
+  await tabB.getByRole("button", { name: "Close tab", exact: true }).click()
+  await confirmSessionTabClose(page)
+  await expect(tabB).toHaveCount(0)
+  await editor.click()
+  await page.evaluate((text) => navigator.clipboard.writeText(text), "typed after closing")
+  await editor.press("ControlOrMeta+V")
+  await expect(editor).toHaveText("typed after closing")
+  await page.keyboard.press("ControlOrMeta+z")
+  await expect(editor).toBeEmpty()
+  await expect(tabB).toHaveCount(0)
+  await expectPath(page, sessionHref(a.id))
+  await page.keyboard.press("Control+z")
+  await expect(tabB).toHaveCount(0)
+})
+
+test("closing undo does not reopen a session behind another dialog", async ({ page }) => {
+  await openSession(page, { name: "CloseDialogUndo", sessions: [a, b] })
+  const tabB = page.locator(`[data-titlebar-tab-slot]:has(a[href="${sessionHref(b.id)}"])`)
+
+  await tabB.getByRole("button", { name: "Close tab", exact: true }).click()
+  await confirmSessionTabClose(page)
+  await expect(tabB).toHaveCount(0)
+  await page.getByRole("button", { name: "Search sessions", exact: true }).click()
+  const search = page.getByRole("dialog").getByRole("combobox")
+  await expect(search).toBeFocused()
+  await page.keyboard.press("Control+z")
+  await expect(search).toBeVisible()
+  await expect(tabB).toHaveCount(0)
+  await page.keyboard.press("Escape")
+  await expect(search).toBeHidden()
+  await page.keyboard.press("Control+z")
+  await expectPath(page, sessionHref(b.id))
+  await expect(tabB).toBeVisible()
 })

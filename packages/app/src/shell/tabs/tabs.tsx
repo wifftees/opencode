@@ -24,6 +24,7 @@ import { TabStorage } from "./schema"
 import { useCurrentRoute } from "@/shell/state/layout"
 import { mergeSessionPins, SessionPins } from "@/home/sessions/pins"
 import { createSessionFolders } from "./folders"
+import { createSessionTabClosing } from "./close"
 
 export type SessionTab = typeof TabStorage.Session.Type
 
@@ -498,7 +499,12 @@ export const { use: useTabs, provider: TabsProvider } = createSimpleContext({
 
         if (!tab) return
 
-        if (tab.type === "session") updateClosed((stack) => pushClosedTab(stack, tab, index, info[tabKey(tab)]))
+        if (tab.type === "session") {
+          sessionTabClosing.confirm(tab)
+
+          return
+        }
+
         removeTab(index)
       },
       reopenClosedTab(target?: SessionTab, options?: { append?: boolean }) {
@@ -517,7 +523,6 @@ export const { use: useTabs, provider: TabsProvider } = createSimpleContext({
         if (!entry) return
         const index = options?.append ? store.length : Math.min(entry.index, store.length)
 
-        if (entry.info) setInfo(tabKey(entry.tab), entry.info)
         void startTransition(() => {
           setStore(
             produce((tabs) => {
@@ -525,6 +530,11 @@ export const { use: useTabs, provider: TabsProvider } = createSimpleContext({
               tabs.splice(index, 0, entry.tab)
             }),
           )
+
+          if (entry.info) setInfo(tabKey(entry.tab), entry.info)
+
+          if (entry.regions) setRegions(tabKey(entry.tab), { ...entry.regions })
+
           navigateTab(entry.tab)
         })
       },
@@ -725,6 +735,22 @@ export const { use: useTabs, provider: TabsProvider } = createSimpleContext({
         setRegions(key, size, value)
       },
     }
+
+    const sessionTabClosing = createSessionTabClosing({
+      title: (tab) => info[tabKey(tab)]?.title,
+      close: (tab) => {
+        const index = store.findIndex((item) => tabKey(item) === tabKey(tab))
+        const current = store[index]
+
+        if (!current || current.type !== "session") return false
+        updateClosed((stack) => pushClosedTab(stack, current, index, info[tabKey(current)], regions[tabKey(current)]))
+        removeTab(index)
+
+        return true
+      },
+      canRestore: (tab) => closedReady() && !!takeClosedTab(closed, store, tab).entry,
+      restore: (tab) => actions.reopenClosedTab(tab),
+    })
 
     return {
       ...actions,

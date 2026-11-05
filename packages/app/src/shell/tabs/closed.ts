@@ -7,12 +7,20 @@ const CLOSED_TAB_LIMIT = 100
 
 // Only session tabs are recorded; closing a draft tab deletes its persisted
 // state, so a reopened draft would come back empty anyway.
-export function pushClosedTab(stack: ClosedTab[], tab: Tab, index: number, info?: TabInfo): ClosedTab[] {
+export function pushClosedTab(
+  stack: ClosedTab[],
+  tab: Tab,
+  index: number,
+  info?: TabInfo,
+  regions?: typeof TabStorage.Region.Type,
+): ClosedTab[] {
   if (tab.type !== "session") return stack
 
   const entry: ClosedTab = { tab: { ...tab }, index }
 
   if (info) entry.info = { ...info }
+
+  if (regions) entry.regions = { ...regions }
 
   return [...stack.filter((item) => !sameTab(item.tab, tab)), entry].slice(-CLOSED_TAB_LIMIT)
 }
