@@ -523,6 +523,7 @@ function MessageTimelineView(
               location={
                 <>
                   <SessionLocation
+                    sessionID={sessionID() ?? props.view.id}
                     project={headerProject()}
                     directory={sessionDirectory()}
                     compact={!!parentID()}

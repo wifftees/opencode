@@ -369,6 +369,7 @@ function SessionScreenContent(props: {
           class="flex h-9 shrink-0 items-center border-b border-v2-border-border-base px-2"
         >
           <SessionLocation
+            sessionID={session.identity.sessionID() ?? props.view().id}
             project={location.project()}
             directory={location.directory()}
             compact={!!session.data.info()?.parentID}

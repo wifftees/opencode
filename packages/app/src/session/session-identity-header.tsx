@@ -32,6 +32,7 @@ import { useLanguage } from "@/runtime/i18n/language"
 import { usePlatform } from "@/runtime/platform/platform"
 import { errorMessage } from "@/shell/layout/helpers"
 import { useLayout, type LocalProject } from "@/shell/state/layout"
+import { SessionTabAvatarView } from "@/shell/layout/session-tab-avatar"
 import { tabKey, useTabs } from "@/shell/tabs/tabs"
 import { useSettingsSurface } from "@/settings/surface"
 import { pathKey } from "@/workspaces/path-key"
@@ -97,6 +98,7 @@ export function SessionHeaderLayout(
  * actions.
  */
 export function SessionLocation(props: {
+  sessionID: string
   project?: Omit<LocalProject, "expanded">
   directory?: string
   /** Child sessions show only the project; their lineage follows. */
@@ -218,14 +220,7 @@ export function SessionLocation(props: {
             aria-label={label()}
             class="relative flex h-7 min-w-0 max-w-full shrink items-center gap-2 overflow-hidden rounded-[6px] px-1.5 text-start text-[13px] font-normal leading-[var(--line-height-compact)] tracking-[-0.04px] text-v2-text-text-muted transition-colors hover:bg-v2-overlay-simple-overlay-hover hover:text-v2-text-text-base focus-visible:bg-v2-overlay-simple-overlay-hover focus-visible:text-v2-text-text-base focus-visible:outline-none data-[expanded]:bg-v2-overlay-simple-overlay-hover data-[expanded]:text-v2-text-text-base"
           >
-            <ProjectAvatar
-              class="shrink-0"
-              aria-hidden="true"
-              fallback={projectName()}
-              src={getProjectAvatarSource(props.project?.id, props.project?.icon)}
-              variant={getProjectAvatarVariant(props.project?.icon?.color)}
-              generated={getProjectAvatarGenerated(props.project)}
-            />
+            <SessionTabAvatarView sessionID={props.sessionID} unread={false} />
             <bdi dir="auto" data-slot="session-location-project" class="session-location-label min-w-0 truncate">
               {projectName()}
             </bdi>
@@ -617,6 +612,7 @@ export function SessionIdentityHeader(props: { sessionID: string; session?: Sess
           location={
             <>
               <SessionLocation
+                sessionID={props.sessionID}
                 project={project()}
                 directory={directory()}
                 compact={!!parentID()}
